@@ -1,0 +1,40 @@
+name: ai-nutritionist-h5
+services:
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_DB_PATH: /app/data/nutrition.db
+      APP_MEDIA_DIR: /app/data/media
+      APP_NGINX_ACCEL: "true"
+      TZ: Asia/Shanghai
+    volumes:
+      - ${DEPLOY_DATA_DIR:-/data_1/ai-nutritionist-h5/data}:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${APP_BIND_IP:-172.16.10.3}:${APP_PORT:-18080}:80"
+    volumes:
+      - ${DEPLOY_DATA_DIR:-/data_1/ai-nutritionist-h5/data}/media:/srv/private-media:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
