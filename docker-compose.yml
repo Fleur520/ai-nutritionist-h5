@@ -3,6 +3,9 @@ services:
   api:
     build:
       context: ./backend
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     restart: unless-stopped
     env_file:
       - .env
@@ -10,6 +13,9 @@ services:
       APP_DB_PATH: /app/data/nutrition.db
       APP_MEDIA_DIR: /app/data/media
       APP_NGINX_ACCEL: "true"
+      VLLM_CHAT_COMPLETIONS_URL: ${VLLM_CHAT_COMPLETIONS_URL:-${LLM_BASE_URL:-http://172.16.10.3:9000/v1}/chat/completions}
+      VLLM_MODEL: ${LLM_MODEL:-${VLLM_MODEL:-Qwen3.8-27B}}
+      VLLM_API_KEY: ${LLM_API_KEY:-${VLLM_API_KEY:-}}
       TZ: Asia/Shanghai
     volumes:
       - ${DEPLOY_DATA_DIR:-/data_1/ai-nutritionist-h5/data}:/app/data
@@ -28,6 +34,9 @@ services:
   web:
     build:
       context: ./frontend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        VITE_REPORTS_ENABLED: ${VITE_REPORTS_ENABLED:-true}
     restart: unless-stopped
     ports:
       - "${APP_BIND_IP:-172.16.10.3}:${APP_PORT:-18080}:80"

@@ -6,7 +6,7 @@ function makeThreadId() {
   // crypto.randomUUID is only available in secure contexts (HTTPS / localhost).
   // crypto.getRandomValues remains available on ordinary LAN HTTP pages.
   const bytes = new Uint8Array(16)
-  if (globalThis.crypto?.getRandomValues) crypto.getRandomValues(bytes)
+  if (typeof globalThis.crypto?.getRandomValues === 'function') crypto.getRandomValues(bytes)
   else for (let i=0;i<16;i++) bytes[i] = Math.floor(Math.random()*256)
   return Array.from(bytes).map(x=>x.toString(16).padStart(2,'0')).join('')
 }
@@ -14,7 +14,7 @@ const threadId=localStorage.getItem('nutrition_thread')||makeThreadId()
 localStorage.setItem('nutrition_thread',threadId)
 const messages=ref<{role:string;content:string}[]>([]),draft=ref(''),busy=ref(false),error=ref(''),viewport=ref<HTMLElement|null>(null)
 const presets=['早餐怎么搭配更合理？','减脂期间怎么补充蛋白质？','怎么改善经常吃外卖的问题？']
-onMounted(async()=>{messages.value=await api('/chat/history?thread_id='+encodeURIComponent(threadId)).catch(()=>[])})
+onMounted(async()=>{messages.value=await api<{role:string;content:string}[]>('/chat/history?thread_id='+encodeURIComponent(threadId)).catch(()=>[])})
 async function scroll(){await nextTick();viewport.value?.scrollTo({top:viewport.value.scrollHeight,behavior:'smooth'})}
 async function send(input?:string){const q=(input||draft.value).trim();if(!q||busy.value)return;busy.value=true;draft.value='';error.value='';messages.value.push({role:'user',content:q});messages.value.push({role:'assistant',content:''});const replyIndex=messages.value.length-1;await scroll()
 try{await streamMessage(q,threadId,s=>{messages.value[replyIndex].content+=s;void scroll()})}catch(e){error.value=e instanceof Error?e.message:'咨询中断';if(!messages.value[replyIndex]?.content)messages.value.pop()}finally{busy.value=false;await scroll()}}

@@ -1,6 +1,8 @@
 # 食光 · AI 营养师 H5
 
-> 面向普通成年人健康管理的轻量 MVP。**Python FastAPI + Vue3 H5 + SQLite + Nginx + Qwen 多模态 + BiSheng 1.3.1**。目标最多同时处理 **10 个在途 AI 请求**，单 Uvicorn Worker 限制；上线前需压测 GPU 推理容量。
+> 面向普通成年人健康管理的轻量 MVP。**Python FastAPI + Vue3 H5 + MySQL / SQLite + Nginx + Qwen 多模态**。目标最多同时处理 **10 个在途 AI 请求**，单 Uvicorn Worker 限制；上线前需压测 GPU 推理容量。
+
+172.16.10.3 的实际部署使用已有 MySQL 5.7、新建的 `ai_nutritionist_h5` 数据库及 `Qwen3.8-27B`。本次报告功能暂不启用。配置位置、运维命令和部署说明见 [服务器部署说明](docs/DEPLOYMENT_172.16.10.3.md)。以下 SQLite / BiSheng 内容保留为其他部署模式的参考。
 
 ## 业务分流
 
@@ -132,7 +134,7 @@ curl http://172.16.10.3:18080/api/health
 
 ```bash
 cd backend
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.lock.txt
 PYTHONPATH=. pytest -q
 ```
 
@@ -140,7 +142,7 @@ PYTHONPATH=. pytest -q
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 ```
 
@@ -152,4 +154,8 @@ npm run build
 - 私有 IP `172.16.10.3` 不可从互联网直接访问，且没有 SSH 授权时，交付的部署脚本不会自动远程执行。
 - BiSheng 1.3.1 属于较早版本，请保留在可信内网并评估升级与安全补丁，不直接对公网开放 v2 Workflow API。
 - 当前报告是**网页可阅读的文字分析**，未生成 Word/PDF；后续如有需要可增加导出。
-- 项目尚未做真实服务器容器镜像构建、两套模型联调、GPU 并发压测；部署上线前需进行这些验收。
+- 服务器已完成构建与核心功能验收，记录见 [服务器部署记录](docs/DEPLOYMENT_172.16.10.3.md)；GPU 并发压测尚未进行。
+
+## 六、自动交付
+
+PR 构建测试、合并后部署、自动验收与回滚见 [AI Native 交付说明](docs/AI_NATIVE_DELIVERY.md)。食品库生成与数据来源见 [食品库说明](docs/FOOD_CATALOG.md)。

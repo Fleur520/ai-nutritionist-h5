@@ -1,0 +1,11 @@
+{
+  "repository": "Fleur520/ai-nutritionist-h5",
+  "branch": "main",
+  "workflow": "ci.yml",
+  "root": "/data_1/ai-nutritionist-h5",
+  "project": "ai-nutritionist-h5",
+  "base_url": "http://172.16.10.3:18080",
+  "interval_seconds": 300,
+  "startup_timeout": 90,
+  "model_check": true
+}

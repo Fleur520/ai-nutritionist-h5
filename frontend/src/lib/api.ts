@@ -1,5 +1,5 @@
-export interface Food {code:string;name:string;kcal:number;protein:number;fat:number;carbs:number}
-export interface MealItem {food_code:string;grams:number;kcal:number;protein:number;fat:number;carbs:number;name:string}
+export interface Food {code:string;name:string;kcal:number;protein:number;fat:number;carbs:number;category?:string;preparation?:string;aliases?:string[];source_type?:string;source_model?:string;batch_id?:string;basis_g?:number;verified?:boolean}
+export interface MealItem {id:string;food_code:string;grams:number;kcal:number;protein:number;fat:number;carbs:number;name:string}
 export interface Meal {id:string;meal_type:string;eaten_at:string;image_id:string|null;items:MealItem[]}
 export interface Summary {days:number;daily:{day:string;kcal:number;protein:number;fat:number;carbs:number}[];totals:{kcal:number;protein:number;fat:number;carbs:number}}
 export interface Profile {user_id:string;name:string;age:number|null;height_cm:number|null;weight_kg:number|null;goal:string}
