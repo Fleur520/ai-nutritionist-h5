@@ -65,7 +65,9 @@ jobs:
           npm run build
       - name: Build both deployment images
         run: |
+          chmod -R go-rwx backend/app
           docker build -t nutrition-api:ci backend
+          docker run --rm nutrition-api:ci python -c "from app.main import app; assert app.title"
           docker build --build-arg VITE_REPORTS_ENABLED=false -t nutrition-web:ci frontend
       - name: Upload test results
         if: always()

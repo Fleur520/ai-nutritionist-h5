@@ -1,7 +1,10 @@
 import json
+import io
+import os
 from pathlib import Path
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
@@ -62,6 +65,22 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(controller.check(self.config)['status'], 'failed-revision-held')
         self.assertEqual(fetch.call_count, 1)
         self.manager.deploy.assert_not_called()
+
+    def test_extracted_source_is_readable_under_private_service_umask(self):
+        stream=io.BytesIO()
+        with tarfile.open(fileobj=stream,mode='w:gz') as archive:
+            item=tarfile.TarInfo('repo/backend/app/__init__.py')
+            item.size=4;item.mode=0o644
+            archive.addfile(item,io.BytesIO(b'test'))
+        previous=os.umask(0o077)
+        try:
+            target=self.root/'download'
+            controller.extract_source(stream.getvalue(),target)
+        finally:
+            os.umask(previous)
+        self.assertEqual((target/'backend/app/__init__.py').stat().st_mode & 0o777,0o644)
+        for folder in (target,target/'backend',target/'backend/app'):
+            self.assertEqual(folder.stat().st_mode & 0o777,0o755)
 
 
 if __name__ == '__main__':
