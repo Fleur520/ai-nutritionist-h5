@@ -1,85 +1,113 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { Camera, Check, LoaderCircle, Plus, Trash2, ArrowRight } from 'lucide-vue-next'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { Camera, Check, LoaderCircle, Plus, Trash2, ArrowRight, Utensils, RefreshCw } from 'lucide-vue-next'
 import { api, jsonBody, type Food, type Recognized } from '../lib/api'
 import FoodPicker from '../components/FoodPicker.vue'
-const emit=defineEmits<{go:[value:string]}>()
-const fileRef=ref<HTMLInputElement|null>(null), preview=ref(''),imageId=ref(''),busy=ref(false),saving=ref(false),error=ref(''),notice=ref(''),mealType=ref('lunch')
-const foods=ref<Food[]>([])
-const items=ref<(Recognized & {food_code:string})[]>([])
-onMounted(async()=>{
- try{foods.value=await api<Food[]>('/foods')}
- catch{error.value='标准食物库加载失败，请刷新页面后重试'}
-})
+
+const emit = defineEmits<{ go: [value: string] }>()
+const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
+const foods = ref<Food[]>([]), foodsLoading = ref(true), foodsError = ref('')
+const items = ref<(Recognized & { food_code: string })[]>([])
+const uploadRequest = new AbortController()
+let disposed = false
+async function loadFoods() {
+  foodsLoading.value = true; foodsError.value = ''
+  try { foods.value = await api<Food[]>('/foods') }
+  catch { foodsError.value = '食品库暂时没有加载出来，请重试。' }
+  finally { foodsLoading.value = false }
+}
+onMounted(loadFoods)
+onBeforeUnmount(() => { disposed = true; uploadRequest.abort(); if (preview.value) URL.revokeObjectURL(preview.value) })
 type ScanItem = (typeof items.value)[number]
-function selectedFood(item:ScanItem){return foods.value.find(food=>food.code===item.food_code)}
-function validWeight(item:ScanItem){
- const grams=Number(item.estimated_grams)
- return Number.isFinite(grams)&&grams>=5&&grams<=3000
+function selectedFood(item: ScanItem) { return foods.value.find(food => food.code === item.food_code) }
+function validWeight(item: ScanItem) {
+  const grams = Number(item.estimated_grams)
+  return Number.isFinite(grams) && grams >= 5 && grams <= 3000
 }
-function itemEnergy(item:ScanItem):number|null{
- const food=selectedFood(item)
- return food&&validWeight(item)?food.kcal*Number(item.estimated_grams)/100:null
+function itemEnergy(item: ScanItem): number | null {
+  const food = selectedFood(item)
+  return food && validWeight(item) ? food.kcal * Number(item.estimated_grams) / 100 : null
 }
-function energyText(value:number){return Number(value.toFixed(1)).toString()}
-const calculatedCount=computed(()=>items.value.filter(item=>itemEnergy(item)!==null).length)
-const total=computed(()=>items.value.reduce((sum,item)=>sum+(itemEnergy(item)??0),0))
-const complete=computed(()=>items.value.length>0&&calculatedCount.value===items.value.length)
-function add(){items.value.push({name:'手动新增',estimated_grams:100,food_code:''})}
-function upload(){fileRef.value?.click()}
-async function onFile(e:Event){
- const input=e.target as HTMLInputElement
- const file=input.files?.[0];input.value='';if(!file)return
- if(file.size>5*1024*1024){error.value='图片不能超过 5MB';return}
- preview.value=URL.createObjectURL(file);busy.value=true;error.value='';notice.value='';items.value=[]
- try{
-   const form=new FormData();form.append('file',file)
-   const result=await api<{id:string}>('/images',{method:'POST',body:form})
-   imageId.value=result.id
-   const recognized=await api<{items:Recognized[];notice:string}>('/meals/recognize',{method:'POST',body:jsonBody({image_id:imageId.value})})
-   items.value=recognized.items.map(x=>({...x,food_code:x.food_code||''}))
-   notice.value=recognized.notice
- }catch(e){error.value=e instanceof Error?e.message:'识别失败'}finally{busy.value=false}
+function energyText(value: number) { return Number(value.toFixed(1)).toString() }
+const calculatedCount = computed(() => items.value.filter(item => itemEnergy(item) !== null).length)
+const total = computed(() => items.value.reduce((sum, item) => sum + (itemEnergy(item) ?? 0), 0))
+const complete = computed(() => items.value.length > 0 && calculatedCount.value === items.value.length)
+function add() {
+  if (busy.value || saving.value) return
+  if (items.value.length >= 30) { error.value = '一餐最多记录 30 项食物。'; return }
+  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '' })
 }
-async function save(){
- if(!complete.value){error.value='请为每项选择食品库条目，并填写 5～3000 克的重量';return}
- saving.value=true;error.value=''
- try{await api('/meals',{method:'POST',body:jsonBody({meal_type:mealType.value,eaten_at:new Date().toISOString(),image_id:imageId.value||null,items:items.value.map(i=>({food_code:i.food_code,grams:i.estimated_grams}))})});emit('go','history')}
- catch(e){error.value=e instanceof Error?e.message:'保存失败'}finally{saving.value=false}
+function upload() { if (!busy.value && !saving.value) fileRef.value?.click() }
+async function onFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]; input.value = ''
+  if (!file || busy.value || saving.value) return
+  if (file.size > 5 * 1024 * 1024) { error.value = '这张照片超过 5MB，请选择小一点的照片。'; return }
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { error.value = '请选择 JPG、PNG 或 WebP 格式的照片。'; return }
+  if (preview.value) URL.revokeObjectURL(preview.value)
+  preview.value = URL.createObjectURL(file)
+  imageId.value = ''
+  items.value = []
+  busy.value = true; error.value = ''; notice.value = ''
+  try {
+    const form = new FormData(); form.append('file', file)
+    const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
+    imageId.value = result.id
+    const recognized = await api<{ items: Recognized[]; notice: string }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
+    items.value = recognized.items.map(item => ({ ...item, food_code: item.food_code || '' }))
+    notice.value = recognized.notice
+  } catch (failure) {
+    if (!uploadRequest.signal.aborted) error.value = failure instanceof Error ? failure.message : '照片识别失败，请重试或手动添加食物。'
+  } finally { busy.value = false }
+}
+async function save() {
+  if (saving.value || busy.value) return
+  if (!complete.value) { error.value = '请为每项选择对应食物，并填写 5～3000 克的重量。'; return }
+  saving.value = true; error.value = ''
+  try {
+    await api('/meals', { method: 'POST', body: jsonBody({ meal_type: mealType.value, eaten_at: new Date().toISOString(), image_id: imageId.value || null, items: items.value.map(item => ({ food_code: item.food_code, grams: item.estimated_grams })) }) })
+    if (!disposed) emit('go', 'history')
+  } catch (failure) { error.value = failure instanceof Error ? failure.message : '保存失败，请稍后重试' }
+  finally { saving.value = false }
 }
 </script>
-<template><section class="page scan-page"><div class="eyebrow">AI FOOD SCANNER</div><h1 class="page-title">认识你盘中的美好。</h1><p class="page-subtitle">上传食物照片，AI 识别菜品，确认分量后计算营养。</p>
-<div class="upload-card" :class="{filled:preview}" @click="upload"><img v-if="preview" :src="preview" alt="餐食预览"/><template v-else><div class="upload-circle"><Camera :size="34"/></div><h3>记录这一餐</h3><p>拍照或从相册选择 · JPG/PNG/WebP</p></template><div class="upload-action">{{preview?'重新选择照片':'选择照片'}} <ArrowRight :size="16"/></div></div>
-<input ref="fileRef" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" capture="environment" @change="onFile"/>
-<div v-if="busy" class="notice"><LoaderCircle :size="16" class="spinning"/> 正在理解食物，请稍候…</div>
-<p v-if="notice" class="notice">{{notice}}</p><p v-if="error" class="error">{{error}}</p>
-<div class="section-header"><h2>识别结果</h2><button class="text-action" @click="add"><Plus :size="16"/> 手动添加</button></div>
-<div v-if="!items.length" class="empty-state">还没有食物记录，先拍照识别，或手动添加。</div>
-<div v-for="(item,index) in items" :key="index" class="food-item">
- <div class="food-head"><strong>{{item.name}}</strong><button class="icon-button" title="删除" @click="items.splice(index,1)"><Trash2 :size="16"/></button></div>
- <FoodPicker v-model="item.food_code" :foods="foods"/>
- <div class="weight-row"><label>重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5"/></label>
- </div>
- <p class="food-energy" :class="{pending:itemEnergy(item)===null}" aria-live="polite">
-  <template v-if="!selectedFood(item)">尚未选择食品库条目，暂未计入能量。</template>
-  <template v-else-if="!validWeight(item)">请填写 5～3000 克的重量，暂未计入能量。</template>
-  <template v-else>{{selectedFood(item)?.kcal}} kcal/100g × {{item.estimated_grams}}g ÷ 100 = <strong>{{energyText(itemEnergy(item)??0)}} kcal</strong></template>
- </p>
- <p v-if="selectedFood(item)" class="food-source">{{selectedFood(item)?.source_type==='ai_estimate'?'AI 估算 · 未核验':'原有演示数据'}} · 每 100 克可食部<span v-if="selectedFood(item)?.preparation"> · {{selectedFood(item)?.preparation}}</span></p>
-</div>
-<div class="result-bottom">
- <label class="form-label">餐别<select v-model="mealType"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select></label>
- <div class="sum-line" aria-live="polite"><span>{{items.length&&!complete?'已匹配食物小计':'本餐估算能量'}}</span><strong>{{energyText(total)}} <small>kcal</small></strong></div>
- <p class="energy-rule">计算方式：每项所选食物每 100 克的能量 × 重量 ÷ 100，再相加。修改选项或重量后实时更新。</p>
- <p v-if="items.length&&!complete" class="energy-warning" role="status">已计入 {{calculatedCount}}/{{items.length}} 项，当前不是整餐能量。请补齐食品库条目和有效重量后保存。</p>
- <button class="primary-button" @click="save" :disabled="saving||busy||!complete"><Check :size="17"/>{{saving?'保存中…':'确认并保存饮食记录'}}</button>
-</div>
-<p class="microcopy">食品库含 AI 生成的营养估算，尚未经过实验核验。请选择对应的食物和生熟状态；复合菜的配料、用油会影响实际数值。</p></section></template>
+
+<template>
+  <section class="page scan-page">
+    <header class="page-header"><div class="eyebrow">CAPTURE YOUR MEAL</div><h1 class="page-title">好好吃饭，从这一餐开始。</h1><p class="page-subtitle">拍下餐盘，认识食物。确认一下分量，就能留下一份饮食日记。</p></header>
+    <button type="button" class="upload-card" :class="{ filled: preview }" :disabled="busy || saving" @click="upload" :aria-label="preview ? '重新选择餐食照片' : '拍照或从相册选择食物照片'">
+      <img v-if="preview" :src="preview" alt="餐食预览" />
+      <template v-else><span class="upload-circle"><Camera :size="32" /></span><h3>拍下你的美味</h3><p>拍照或从相册选择 · 5MB 以内</p></template>
+      <span class="upload-action">{{ preview ? '重新选择照片' : '选择餐食照片' }}<ArrowRight :size="16" /></span>
+    </button>
+    <input ref="fileRef" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="onFile" />
+    <div v-if="busy" class="notice scan-progress" role="status"><LoaderCircle :size="19" class="spinning" /><span>正在认识盘中的食物…<small>分量是初步估算，稍后可以自己调整</small></span></div>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p><p v-if="error" class="error" role="alert">{{ error }}</p>
+    <div v-if="foodsError" class="error food-load-error" role="alert"><span>{{ foodsError }}</span><button type="button" class="text-action" @click="loadFoods"><RefreshCw :size="16" />重试</button></div>
+    <div class="section-header"><div><h2>{{ items.length ? '确认食物与分量' : '这一餐吃了什么' }}</h2><p class="section-copy">估算会有偏差，你可以随时调整</p></div><button type="button" class="text-action" @click="add" :disabled="busy || saving || items.length >= 30"><Plus :size="17" />手动添加</button></div>
+    <div v-if="!items.length && !busy" class="empty-state scan-empty"><Utensils :size="28" /><strong>记录自己的饮食节奏</strong><p>拍照后，食物会出现在这里。<br />也可以直接手动添加。</p></div>
+    <article v-for="(item, index) in items" :key="index" class="food-item">
+      <div class="food-head"><div><span class="food-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ item.name }}</strong></div><button type="button" class="icon-button" :aria-label="'删除' + item.name" :disabled="saving" @click="items.splice(index, 1)"><Trash2 :size="18" /></button></div>
+      <FoodPicker v-model="item.food_code" :foods="foods" :disabled="saving || foodsLoading" />
+      <div class="weight-row"><label>估计重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5" inputmode="decimal" :disabled="saving" :aria-invalid="!validWeight(item)" /></label><div class="item-calories"><span>这份食物</span><strong>{{ itemEnergy(item) === null ? '—' : energyText(itemEnergy(item) || 0) }}<small> kcal</small></strong></div></div>
+      <p class="food-energy" :class="{ pending: itemEnergy(item) === null }" aria-live="polite">
+        <template v-if="!selectedFood(item)">请选择对应食物，再计算这一份的能量。</template>
+        <template v-else-if="!validWeight(item)">重量请填写 5～3000 克。</template>
+        <template v-else>{{ selectedFood(item)?.kcal }} kcal/100g × {{ item.estimated_grams }}g ÷ 100</template>
+      </p>
+      <p v-if="selectedFood(item)" class="food-source">{{ selectedFood(item)?.source_type === 'ai_estimate' ? 'AI 估算 · 未核验' : '原有演示数据' }} · 每 100 克可食部<span v-if="selectedFood(item)?.preparation"> · {{ selectedFood(item)?.preparation }}</span></p>
+    </article>
+    <div v-if="items.length" class="result-bottom">
+      <label class="form-label">记在哪一餐<select v-model="mealType" :disabled="saving"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select></label>
+      <div class="sum-line" aria-live="polite"><span>{{ !complete ? '已匹配食物小计' : '本餐估算能量' }}</span><strong>{{ energyText(total) }} <small>kcal</small></strong></div>
+      <p class="energy-rule">按每 100 克食物能量 × 实际重量计算，再相加。调整食物或重量，估算会实时更新。</p>
+      <p v-if="!complete" class="energy-warning" role="status">已计入 {{ calculatedCount }}/{{ items.length }} 项。补齐食物与重量后，就可以保存整餐记录。</p>
+      <button type="button" class="primary-button" @click="save" :disabled="saving || busy || !complete"><Check :size="19" />{{ saving ? '正在保存这一餐…' : '保存这一餐' }}</button>
+    </div>
+    <p class="microcopy">食品库包含未经实验核验的 AI 营养估算。请选择相应的食物与生熟状态；配料、烹调方式和用油会影响实际营养。</p>
+  </section>
+</template>
+
 <style scoped>
-.food-energy{font-size:11px;line-height:1.8;color:#51765b;margin:12px 0 0;overflow-wrap:anywhere}
-.food-energy.pending{color:#a27842}
-.energy-rule{font-size:11px;line-height:1.8;color:#819285;margin:0 0 12px}
-.energy-warning{font-size:12px;line-height:1.8;color:#8e6229;background:#fff7e9;border-radius:10px;padding:10px 12px;margin:0 0 14px}
-.weight-row{margin-top:12px}.weight-row label{display:grid;gap:6px;font-size:11px;color:#647e6a}.weight-row input{width:100%;box-sizing:border-box;border:1px solid #dfe8df;border-radius:10px;padding:10px;color:#304e3a;background:#fafcf9;font-size:12px}
-.food-source{font-size:10px;line-height:1.7;color:#9a854e;margin:5px 0 0}
+.upload-card{width:100%;font:inherit;color:inherit;padding:0}.upload-card:disabled{opacity:1}.section-copy{margin:5px 0 0;font-size:12px;line-height:1.5;color:#7b8d81}.scan-empty{display:flex;flex-direction:column;align-items:center;gap:12px;background:white;border:1px solid #e5ebe5;padding:28px 18px}.scan-empty>svg{color:#8eac8c}.scan-empty strong{font-size:16px;color:#496b50}.scan-empty p{margin:0;font-size:14px;line-height:1.8;color:#7b8e80}.scan-progress small{display:block;font-size:12px;color:#7b8e80;margin-top:3px}.scan-progress>svg{flex-shrink:0}.food-head>div{display:flex;align-items:center;gap:9px;min-width:0}.food-head strong{overflow-wrap:anywhere}.food-index{font-size:12px;color:#839a85;border-radius:8px;background:#f0f5ed;padding:5px 7px;font-weight:600}.food-head .icon-button{min-width:44px;min-height:44px;flex-shrink:0}.food-energy{font-size:12px;line-height:1.7;color:#6d8773;margin:10px 0 0;overflow-wrap:anywhere}.food-energy.pending{color:#9e713f}.energy-rule{font-size:12px;line-height:1.8;color:#77897d;margin:0 0 16px}.energy-warning{font-size:13px;line-height:1.8;color:#8c622d;background:#fff5e9;border-radius:13px;padding:12px 14px;margin:0 0 16px}.weight-row{margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:end}.weight-row label{display:grid;gap:8px;font-size:13px;font-weight:500;color:#5e7565}.weight-row input{width:100%;min-width:0;box-sizing:border-box;border:1px solid #dfe8df;border-radius:12px;padding:11px 12px;color:#304e3a;background:#fafcf9;font-size:16px;min-height:48px}.weight-row input[aria-invalid=true]{border-color:#d9ad7a}.item-calories{padding:0 5px 8px;text-align:right}.item-calories>span{display:block;font-size:12px;color:#8a9a8e;margin-bottom:7px}.item-calories strong{font-size:23px;font-weight:700;color:#245b43;letter-spacing:-.5px}.item-calories small{font-size:12px;color:#819487;letter-spacing:0;font-weight:400}.food-source{font-size:11px;line-height:1.8;color:#8d805b;margin:5px 0 0}.result-bottom{background:white;border:1px solid #e5ebe5;border-radius:22px;padding:20px}.food-load-error{display:flex;gap:8px;align-items:center;justify-content:space-between}.food-load-error .text-action{min-width:60px;min-height:44px}.sum-line{margin:19px 0 12px}.scan-page .text-action{min-height:44px;padding:4px 0;flex-shrink:0;font-size:13px}.scan-page .section-header{align-items:center}
 </style>

@@ -62,6 +62,8 @@ jobs:
           VITE_REPORTS_ENABLED: 'false'
         run: |
           npm ci --no-audit --no-fund
+          npm run test:markdown
+          npm run test:api
           npm run build
       - name: Build both deployment images
         run: |
