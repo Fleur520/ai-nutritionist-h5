@@ -35,11 +35,21 @@ def extract_source(content,target):
             if not relative.parts:continue
             destination=(target/relative).resolve()
             if not destination.is_relative_to(target):raise ValueError('Archive path escapes target')
-            if member.isdir():destination.mkdir(parents=True,exist_ok=True)
+            if member.isdir():
+                destination.mkdir(parents=True,exist_ok=True)
+                destination.chmod(0o755)
             else:
                 destination.parent.mkdir(parents=True,exist_ok=True)
+                # systemd uses UMask=0077. Public source must still be readable
+                # by the non-root runtime user after Docker COPY.
+                parent=destination.parent
+                while parent.is_relative_to(target):
+                    parent.chmod(0o755)
+                    if parent==target:break
+                    parent=parent.parent
                 with archive.extractfile(member) as source,destination.open('wb') as output:
                     output.write(source.read())
+                destination.chmod(0o755 if member.mode & 0o111 else 0o644)
 
 
 def check(config):
