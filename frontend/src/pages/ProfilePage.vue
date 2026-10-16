@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue'
 import { UserRound, Save, LogOut, ShieldCheck } from 'lucide-vue-next'
 import { api, jsonBody, type Profile } from '../lib/api'
 const emit=defineEmits<{logout:[]}>(),model=ref<Profile>({user_id:'',name:'',age:null,height_cm:null,weight_kg:null,goal:'balanced'}),busy=ref(false),message=ref('')
-onMounted(async()=>{model.value=await api('/profile').catch(()=>model.value)})
+onMounted(async()=>{model.value=await api<Profile>('/profile').catch(()=>model.value)})
 async function save(){busy.value=true;message.value='';try{await api('/profile',{method:'PUT',body:jsonBody(model.value)});message.value='保存成功'}catch(e){message.value=e instanceof Error?e.message:'保存失败'}finally{busy.value=false}}
 async function logout(){await api('/auth/logout',{method:'POST'});emit('logout')}
 </script>

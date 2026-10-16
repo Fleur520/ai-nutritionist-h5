@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { ArrowUpRight, Camera, MessageCircle, ChevronRight, Flame, Beef, Wheat, Droplets } from 'lucide-vue-next'
 import { api, type Summary } from '../lib/api'
+import { reportsEnabled } from '../lib/features'
 const emit=defineEmits<{go:[value:string]}>()
 const summary=ref<Summary|null>(null)
 onMounted(async()=>{try{summary.value=await api('/nutrition/summary?days=1')}catch{}})
@@ -17,7 +18,7 @@ const stats=[{key:'protein',name:'蛋白质',unit:'g',icon:Beef},{key:'carbs',na
   </div>
   <div class="section-header"><h2>你想做什么？</h2><span>开始健康的一天</span></div>
   <div class="quick-grid"><button class="quick-card scan" @click="emit('go','scan')"><div class="quick-icon"><Camera :size="23"/></div><h3>拍一张，识别热量</h3><p>AI 看懂你的每一餐</p><ArrowUpRight :size="20" class="quick-arrow"/></button><button class="quick-card ask" @click="emit('go','chat')"><div class="quick-icon"><MessageCircle :size="23"/></div><h3>问问 AI 营养师</h3><p>有依据的饮食建议</p><ArrowUpRight :size="20" class="quick-arrow"/></button></div>
-  <button class="tip-card" @click="emit('go','report')"><span class="tip-icon">📋</span><span><b>生成 7 日 / 30 日健康报告</b><small>BiSheng Workflow · 饮食数据分析与建议</small></span><ChevronRight :size="19"/></button>
+  <button v-if="reportsEnabled" class="tip-card" @click="emit('go','report')"><span class="tip-icon">📋</span><span><b>生成 7 日 / 30 日健康报告</b><small>BiSheng Workflow · 饮食数据分析与建议</small></span><ChevronRight :size="19"/></button>
   <button class="tip-card" @click="emit('go','history')"><span class="tip-icon">✦</span><span><b>你的饮食日记</b><small>每天一点点，更了解自己的身体</small></span><ChevronRight :size="19"/></button>
   <div class="disclaimer">小提示：食物热量是估算值，照片无法准确判断食材重量、用油和隐藏配料。</div>
 </section></template>

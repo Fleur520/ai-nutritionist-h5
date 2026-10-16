@@ -1,0 +1,17 @@
+[Unit]
+Description=AI nutritionist delivery after successful GitHub CI
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data_1/ai-nutritionist-h5
+ExecStart=/usr/bin/python3 /data_1/ai-nutritionist-h5/.delivery/bin/controller.py --config /data_1/ai-nutritionist-h5/.delivery/controller.json
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -4,6 +4,14 @@ from pathlib import Path
 
 # Important: set all settings before importing app.
 _TEMP=tempfile.TemporaryDirectory()
+# A deployment .env may select MySQL. Tests only use it when deliberately
+# pointed at a separate test database, never by inheriting production settings.
+os.environ['APP_DB_ENGINE']=os.environ.get('TEST_DB_ENGINE','sqlite')
+if os.environ['APP_DB_ENGINE']=='mysql':
+    test_database=os.environ.get('TEST_MYSQL_DATABASE','')
+    if not test_database or not test_database.startswith('test_'):
+        raise RuntimeError('MySQL tests require TEST_MYSQL_DATABASE starting with test_')
+    os.environ['MYSQL_DATABASE']=test_database
 os.environ['APP_DB_PATH']=str(Path(_TEMP.name)/'db.sqlite3')
 os.environ['APP_MEDIA_DIR']=str(Path(_TEMP.name)/'media')
 os.environ['DEMO_MODE']='true'
@@ -17,9 +25,13 @@ def test_end_to_end():
         assert client.get('/api/health').status_code==200
         r=client.post('/api/auth/register',json={'email':'example@example.com','password':'safe_password_123'})
         assert r.status_code==201,r.text
+        duplicate=client.post('/api/auth/register',json={'email':'EXAMPLE@example.com','password':'safe_password_123'})
+        assert duplicate.status_code==409,duplicate.text
+        assert client.get('/api/auth/me').json()['email']=='example@example.com'
         foods=client.get('/api/foods').json()
         assert any(x['code']=='rice' for x in foods)
-        assert client.put('/api/profile',json={'name':'Test','age':28,'height_cm':170,'weight_kg':70,'goal':'balanced'}).status_code==200
+        assert client.put('/api/profile',json={'name':'营养测试 🥗 ? %','age':28,'height_cm':170,'weight_kg':70,'goal':'balanced'}).status_code==200
+        assert client.get('/api/profile').json()['name']=='营养测试 🥗 ? %'
         resp=client.post('/api/meals',json={'meal_type':'lunch','eaten_at':'2026-10-16T12:00:00+00:00','items':[{'food_code':'rice','grams':100}]})
         assert resp.status_code==201,resp.text
         assert client.get('/api/meals',params={'day':'2026-10-16'}).json()[0]['items'][0]['kcal']==116
@@ -28,6 +40,8 @@ def test_end_to_end():
         assert client.get('/api/chat/history',params={'thread_id':'thread-demo'}).status_code==200
         assert client.post('/api/auth/logout').status_code==200
         assert client.get('/api/auth/me').status_code==401
+        assert client.post('/api/auth/login',json={'email':'example@example.com','password':'safe_password_123'}).status_code==200
+        assert client.get('/api/auth/me').status_code==200
 
 
 def test_image_upload_is_private_and_invalid_food_rejected():

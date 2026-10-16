@@ -10,7 +10,6 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
-import sqlite3
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -19,7 +18,8 @@ from .ai import chat_chunks, recognize_image
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
-from .db import connect, initialize
+from .db import INTEGRITY_ERRORS, connect, initialize
+from .food_catalog import catalog_rows, initialize_catalog, match_food
 from .schemas import ChatMessage, Credentials, MealCreate, ProfilePatch
 
 log=logging.getLogger('nutrition')
@@ -30,6 +30,7 @@ Image.MAX_IMAGE_PIXELS=16_000_000
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialize()
+    await initialize_catalog()
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
     yield
 
@@ -59,6 +60,9 @@ async def ai_slot():
 @app.get('/api/health')
 async def health():return {'status':'ok','demo':settings.demo_mode}
 
+@app.get('/api/version')
+async def version():return {'revision':settings.app_revision}
+
 @app.post('/api/auth/register',status_code=201)
 async def register(body:Credentials,response:Response):
     email=body.email.strip().lower()
@@ -71,7 +75,7 @@ async def register(body:Credentials,response:Response):
                              (user_id,email,hash_password(body.password)))
             await db.execute('INSERT INTO profiles(user_id) VALUES(?)',(user_id,))
             await db.commit()
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(409,'邮箱已注册') from exc
     token=await create_session(user_id)
     response.set_cookie(COOKIE,token,httponly=True,secure=settings.app_cookie_secure,samesite='lax',max_age=14*86400,path='/')
@@ -119,9 +123,7 @@ async def update_profile(body:ProfilePatch,user:str=Depends(current_user)):
 
 @app.get('/api/foods')
 async def foods(user:str=Depends(current_user)):
-    async with connect() as db:
-        cur=await db.execute('SELECT * FROM foods ORDER BY code')
-        return [rowdict(r) for r in await cur.fetchall()]
+    return await catalog_rows()
 
 @app.post('/api/images',status_code=201)
 async def upload_image(file:UploadFile=File(...),user:str=Depends(current_user)):
@@ -168,7 +170,12 @@ async def recognize(body:dict,user:str=Depends(current_user)):
     await ai_slot()
     try:
         items=await recognize_image(Path(r['path']),r['mime'])
-        return {'items':items,'notice':'仅识别食物类别，重量需人工确认；营养值由食品成分表计算。'}
+        catalog=await catalog_rows()
+        valid_codes={food['code'] for food in catalog}
+        for item in items:
+            if item.get('food_code') not in valid_codes:
+                item['food_code']=match_food(item['name'],catalog)
+        return {'items':items,'notice':'食物与分量需人工确认；食品库中的 AI 估算值未经实验核验，菜品会随配料和用油变化。'}
     finally:
         AI_SEM.release()
 
@@ -249,6 +256,8 @@ async def summary(days:int=1,user:str=Depends(current_user)):
 
 @app.post('/api/reports/generate',status_code=201)
 async def generate_nutrition_report(days:int=7,user:str=Depends(current_user)):
+    if not settings.app_reports_enabled:
+        raise HTTPException(503,'健康报告功能暂未启用')
     if days not in (7,30):
         raise HTTPException(422,'报告周期应为 7 或 30 天')
     computed=await nutrition_summary_for_user(user, days)

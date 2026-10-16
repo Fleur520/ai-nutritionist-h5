@@ -88,15 +88,24 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
                'messages': [{'role': 'user', 'content': [
                    {'type': 'text', 'text': prompt},
                    {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img}'}}
-               ]}], 'temperature': 0, 'max_tokens': 800,
+               ]}], 'temperature': 0, 'max_tokens': s.vllm_vision_max_tokens,
+               'chat_template_kwargs': {'enable_thinking': s.vllm_vision_enable_thinking},
                'response_format': {'type': 'json_object'}}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(100, connect=8)) as client:
             response = await client.post(url, headers=_auth_headers(s.vllm_vision_api_key or s.vllm_api_key), json=payload)
             response.raise_for_status()
-            content = response.json()['choices'][0]['message']['content']
+            body = response.json()
+            choice = body['choices'][0]
+            if choice.get('finish_reason') == 'length':
+                log.warning('Multimodal output truncated at max_tokens=%s', s.vllm_vision_max_tokens)
+                raise HTTPException(502, '识别结果未完整返回，请重试或手动记录')
+            content = choice['message'].get('content')
         if isinstance(content, list):
             content = ''.join(x.get('text', '') for x in content if isinstance(x, dict))
+        if not isinstance(content, str) or not content.strip():
+            log.warning('Multimodal response has no text content; finish_reason=%s', choice.get('finish_reason'))
+            raise HTTPException(502, '模型未返回有效识别结果，请重试或手动记录')
         result = json.loads(content)
         items = result['items']
         if not isinstance(items, list):
@@ -104,6 +113,6 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
         return [{'name': str(x.get('name', '未知食物'))[:80],
                  'estimated_grams': max(5, min(3000, float(x.get('estimated_grams') or 100))),
                  'food_code': None} for x in items[:8] if isinstance(x, dict)]
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         log.warning('Multimodal request failed: %s', type(exc).__name__)
         raise HTTPException(502, '多模态识别失败，请重试或手动记录') from exc

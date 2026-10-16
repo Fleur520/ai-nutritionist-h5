@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { House, Camera, MessageCircle, ClipboardList, UserRound, Sparkles } from 'lucide-vue-next'
 import { api } from './lib/api'
+import { reportsEnabled } from './lib/features'
 import AuthGate from './components/AuthGate.vue'
 import HomePage from './pages/HomePage.vue'
 import ScanPage from './pages/ScanPage.vue'
@@ -26,7 +27,7 @@ const go=(value:string)=>tab.value=value
         <ScanPage v-else-if="tab==='scan'" @go="go"/>
         <ChatPage v-else-if="tab==='chat'"/>
         <HistoryPage v-else-if="tab==='history'"/>
-        <ReportPage v-else-if="tab==='report'" @go="go"/>
+        <ReportPage v-else-if="reportsEnabled && tab==='report'" @go="go"/>
         <ProfilePage v-else @logout="user=null;tab='home'"/>
       </main>
       <nav class="tabbar" aria-label="底部导航">

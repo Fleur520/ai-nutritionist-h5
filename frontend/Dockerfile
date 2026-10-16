@@ -1,7 +1,10 @@
-FROM node:22-alpine AS build
+ARG NODE_IMAGE=node:22-alpine
+FROM ${NODE_IMAGE} AS build
+ARG VITE_REPORTS_ENABLED=true
+ENV VITE_REPORTS_ENABLED=${VITE_REPORTS_ENABLED}
 WORKDIR /work
 COPY package*.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 
