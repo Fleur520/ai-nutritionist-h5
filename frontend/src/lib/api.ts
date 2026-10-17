@@ -5,7 +5,7 @@ export interface Summary {days:number;daily:{day:string;kcal:number;protein:numb
 export interface Profile {user_id:string;name:string;age:number|null;height_cm:number|null;weight_kg:number|null;goal:string}
 export interface NutritionReport {id:string;days:number;content:string;source:string;summary:Summary&{recorded_days:number}}
 export interface ReportMeta {id:string;days:number;source:string;created_at:string}
-export interface Recognized {name:string;estimated_grams:number;food_code:string|null}
+export interface Recognized {name:string;estimated_grams:number;food_code:string|null;preparation?:string;match_status?:string;matched_name?:string|null;match_note?:string;candidates?:Food[]}
 
 const fieldNames:Record<string,string>={email:'邮箱',password:'密码',name:'昵称',age:'年龄',height_cm:'身高',weight_kg:'体重',goal:'健康目标',grams:'重量',food_code:'食物',message:'消息',items:'食物记录'}
 function readableError(data:unknown,status:number):string {

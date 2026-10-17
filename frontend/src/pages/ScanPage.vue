@@ -7,7 +7,8 @@ import FoodPicker from '../components/FoodPicker.vue'
 const emit = defineEmits<{ go: [value: string] }>()
 const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
 const foods = ref<Food[]>([]), foodsLoading = ref(true), foodsError = ref('')
-const items = ref<(Recognized & { food_code: string })[]>([])
+const items = ref<(Recognized & { food_code: string; originalFoodCode?: string; manualSelection?: boolean })[]>([])
+const foodsByCode = computed(() => new Map(foods.value.map(food => [food.code, food])))
 const uploadRequest = new AbortController()
 let disposed = false
 async function loadFoods() {
@@ -19,7 +20,54 @@ async function loadFoods() {
 onMounted(loadFoods)
 onBeforeUnmount(() => { disposed = true; uploadRequest.abort(); if (preview.value) URL.revokeObjectURL(preview.value) })
 type ScanItem = (typeof items.value)[number]
-function selectedFood(item: ScanItem) { return foods.value.find(food => food.code === item.food_code) }
+function selectedFood(item: ScanItem) { return foodsByCode.value.get(item.food_code) }
+function hasMatchingInfo(item: ScanItem) { return typeof item.match_status === 'string' }
+function chooseFood(item: ScanItem, code: string) {
+  if (saving.value || foodsLoading.value || code && !foodsByCode.value.has(code)) return
+  item.food_code = code
+  item.manualSelection = true
+}
+function matchingLabel(item: ScanItem) {
+  return item.match_status === 'matched' && item.food_code === item.originalFoodCode && !item.manualSelection
+    ? '已匹配食品库' : '已手动选择食物'
+}
+function usesLegacyReference(item: ScanItem) {
+  return item.match_note === 'legacy_cooked_reference' && item.food_code === item.originalFoodCode
+}
+function matchingReason(item: ScanItem) {
+  switch (item.match_status) {
+    case 'ambiguous': return '有几种相近的食物，名称或做法还不能确定，请你选一下。'
+    case 'preparation_conflict': return '照片中的做法与食品库记录不同，请核对生熟和烹调方式后选择。'
+    case 'name_mismatch': return '找到的食物与照片名称不完全一致，请核对后选择。'
+    case 'stale_candidate': return '食品库记录已有更新，请重新选择对应食物。'
+    case 'no_evidence':
+    case 'not_found': return '暂时没有找到合适的食品库记录，可以换个名称搜索。'
+    default: return '还不能确定对应食物，请你从食品库中选一下。'
+  }
+}
+const cleanFoodName = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+function suggestionScore(name: string, food: Food) {
+  const target = cleanFoodName(name)
+  if (!target) return 0
+  const parts = new Set(Array.from({ length: Math.max(0, target.length - 1) }, (_, index) => target.slice(index, index + 2)))
+  return Math.max(0, ...[food.name, ...(food.aliases || [])].map(label => {
+    const candidate = cleanFoodName(label)
+    if (candidate === target) return 4
+    if (target.length >= 2 && candidate.includes(target) || candidate.length >= 2 && target.includes(candidate)) return 3
+    return [...parts].some(part => candidate.includes(part)) ? 1 : 0
+  }))
+}
+function relevantCandidates(item: ScanItem) {
+  const unique = new Set<string>()
+  return (item.candidates || []).flatMap(candidate => {
+    // Names, preparation and nutrition always come from the current /foods data.
+    const food = foodsByCode.value.get(candidate.code)
+    if (!food || unique.has(food.code)) return []
+    unique.add(food.code)
+    const score = suggestionScore(item.name, food)
+    return score ? [{ food, score }] : []
+  }).sort((left, right) => right.score - left.score).slice(0, 3).map(entry => entry.food)
+}
 function validWeight(item: ScanItem) {
   const grams = Number(item.estimated_grams)
   return Number.isFinite(grams) && grams >= 5 && grams <= 3000
@@ -54,7 +102,7 @@ async function onFile(event: Event) {
     const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
     imageId.value = result.id
     const recognized = await api<{ items: Recognized[]; notice: string }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
-    items.value = recognized.items.map(item => ({ ...item, food_code: item.food_code || '' }))
+    items.value = recognized.items.map(item => ({ ...item, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false }))
     notice.value = recognized.notice
   } catch (failure) {
     if (!uploadRequest.signal.aborted) error.value = failure instanceof Error ? failure.message : '照片识别失败，请重试或手动添加食物。'
@@ -88,7 +136,23 @@ async function save() {
     <div v-if="!items.length && !busy" class="empty-state scan-empty"><Utensils :size="28" /><strong>记录自己的饮食节奏</strong><p>拍照后，食物会出现在这里。<br />也可以直接手动添加。</p></div>
     <article v-for="(item, index) in items" :key="index" class="food-item">
       <div class="food-head"><div><span class="food-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ item.name }}</strong></div><button type="button" class="icon-button" :aria-label="'删除' + item.name" :disabled="saving" @click="items.splice(index, 1)"><Trash2 :size="18" /></button></div>
-      <FoodPicker v-model="item.food_code" :foods="foods" :disabled="saving || foodsLoading" />
+      <div v-if="hasMatchingInfo(item)" class="matching-info" aria-live="polite">
+        <template v-if="selectedFood(item)">
+          <span class="matching-tag"><Check :size="14" aria-hidden="true" />{{ matchingLabel(item) }}</span>
+          <p v-if="usesLegacyReference(item)" class="matching-reference">这条参考记录只标注了“熟”，没有具体做法，请确认是否适合这一餐。</p>
+        </template>
+        <template v-else>
+          <p class="matching-reason">{{ matchingReason(item) }}</p>
+          <p v-if="item.preparation" class="matching-preparation">照片参考做法：{{ item.preparation }}</p>
+          <div v-if="relevantCandidates(item).length" class="matching-candidates">
+            <span class="matching-candidates-label">可能相近的食物 · 点选后才计入能量</span>
+            <button v-for="food in relevantCandidates(item)" :key="food.code" type="button" class="candidate-button" :disabled="saving || foodsLoading" :aria-label="'选择食品库食物：' + food.name + '，' + (food.preparation || '做法未注明')" @click="chooseFood(item, food.code)">
+              <span><strong>{{ food.name }}</strong><small>{{ food.preparation || '做法未注明' }}</small></span><ArrowRight :size="16" aria-hidden="true" />
+            </button>
+          </div>
+        </template>
+      </div>
+      <FoodPicker :model-value="item.food_code" :foods="foods" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
       <div class="weight-row"><label>估计重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5" inputmode="decimal" :disabled="saving" :aria-invalid="!validWeight(item)" /></label><div class="item-calories"><span>这份食物</span><strong>{{ itemEnergy(item) === null ? '—' : energyText(itemEnergy(item) || 0) }}<small> kcal</small></strong></div></div>
       <p class="food-energy" :class="{ pending: itemEnergy(item) === null }" aria-live="polite">
         <template v-if="!selectedFood(item)">请选择对应食物，再计算这一份的能量。</template>
@@ -110,4 +174,5 @@ async function save() {
 
 <style scoped>
 .upload-card{width:100%;font:inherit;color:inherit;padding:0}.upload-card:disabled{opacity:1}.section-copy{margin:5px 0 0;font-size:12px;line-height:1.5;color:#7b8d81}.scan-empty{display:flex;flex-direction:column;align-items:center;gap:12px;background:white;border:1px solid #e5ebe5;padding:28px 18px}.scan-empty>svg{color:#8eac8c}.scan-empty strong{font-size:16px;color:#496b50}.scan-empty p{margin:0;font-size:14px;line-height:1.8;color:#7b8e80}.scan-progress small{display:block;font-size:12px;color:#7b8e80;margin-top:3px}.scan-progress>svg{flex-shrink:0}.food-head>div{display:flex;align-items:center;gap:9px;min-width:0}.food-head strong{overflow-wrap:anywhere}.food-index{font-size:12px;color:#839a85;border-radius:8px;background:#f0f5ed;padding:5px 7px;font-weight:600}.food-head .icon-button{min-width:44px;min-height:44px;flex-shrink:0}.food-energy{font-size:12px;line-height:1.7;color:#6d8773;margin:10px 0 0;overflow-wrap:anywhere}.food-energy.pending{color:#9e713f}.energy-rule{font-size:12px;line-height:1.8;color:#77897d;margin:0 0 16px}.energy-warning{font-size:13px;line-height:1.8;color:#8c622d;background:#fff5e9;border-radius:13px;padding:12px 14px;margin:0 0 16px}.weight-row{margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:end}.weight-row label{display:grid;gap:8px;font-size:13px;font-weight:500;color:#5e7565}.weight-row input{width:100%;min-width:0;box-sizing:border-box;border:1px solid #dfe8df;border-radius:12px;padding:11px 12px;color:#304e3a;background:#fafcf9;font-size:16px;min-height:48px}.weight-row input[aria-invalid=true]{border-color:#d9ad7a}.item-calories{padding:0 5px 8px;text-align:right}.item-calories>span{display:block;font-size:12px;color:#8a9a8e;margin-bottom:7px}.item-calories strong{font-size:23px;font-weight:700;color:#245b43;letter-spacing:-.5px}.item-calories small{font-size:12px;color:#819487;letter-spacing:0;font-weight:400}.food-source{font-size:11px;line-height:1.8;color:#8d805b;margin:5px 0 0}.result-bottom{background:white;border:1px solid #e5ebe5;border-radius:22px;padding:20px}.food-load-error{display:flex;gap:8px;align-items:center;justify-content:space-between}.food-load-error .text-action{min-width:60px;min-height:44px}.sum-line{margin:19px 0 12px}.scan-page .text-action{min-height:44px;padding:4px 0;flex-shrink:0;font-size:13px}.scan-page .section-header{align-items:center}
+.matching-info{margin:-2px 0 16px}.matching-tag{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:9px;background:#edf5ee;color:#32644a;font-size:12px;font-weight:500}.matching-reference,.matching-reason{margin:9px 0 0;padding:11px 13px;border:1px solid #f0e3cf;border-radius:12px;background:#fff9ef;color:#88683e;font-size:13px;line-height:1.75;overflow-wrap:anywhere}.matching-reason{margin:0}.matching-preparation{margin:7px 0 0;color:#7b8d81;font-size:12px;line-height:1.6}.matching-candidates{display:grid;gap:7px;margin-top:12px}.matching-candidates-label{font-size:12px;color:#7b8d81;line-height:1.6}.candidate-button{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:48px;padding:10px 12px;border:1px solid #dfe8df;border-radius:12px;background:#fafcf9;color:#315b42;text-align:left;cursor:pointer;font:inherit}.candidate-button>span{display:grid;gap:3px;min-width:0}.candidate-button strong{font-size:13px;font-weight:500;line-height:1.5;overflow-wrap:anywhere}.candidate-button small{font-size:11px;line-height:1.5;color:#7b8d81}.candidate-button>svg{flex-shrink:0;color:#819c87}.candidate-button:hover{border-color:#9abb9d;background:#f1f7ee}.candidate-button:focus-visible{outline:2px solid #72a37b;outline-offset:2px}.candidate-button:disabled{opacity:.55;cursor:default}
 </style>
