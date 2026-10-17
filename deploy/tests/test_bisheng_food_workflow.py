@@ -60,6 +60,26 @@ def native_retriever(fake_store, calls):
 
 
 class WorkflowGeneratorTests(unittest.TestCase):
+    def test_editor_controls_have_native_required_metadata_and_output_variables(self):
+        body = build_workflow(7, 11, 12, snapshot_id=SNAPSHOT)
+        for node in body["data"]["nodes"]:
+            params = {p["key"]: p for group in node["data"]["group_params"] for p in group["params"]}
+            for param in params.values():
+                self.assertTrue(param["label"])
+                if param["type"] == "output_form":
+                    self.assertEqual(param["options"], [])
+                if param["type"] == "slide":
+                    self.assertEqual(param["scope"], [0, 2])
+                    self.assertGreater(param["step"], 0)
+                if param["type"] == "code_input":
+                    for field in param["value"]:
+                        if field["type"] == "ref":
+                            self.assertTrue(field["label"])
+                            self.assertTrue(field["label"].endswith("/" + field["value"].partition(".")[2]))
+            if node["data"]["type"] == "llm":
+                self.assertEqual(params["output"]["value"], [{"key": "output", "label": "模型输出"}])
+                self.assertIn("value.map", params["output"]["global"])
+
     def test_native_file_visual_top_eight_retrieval_and_output_schema(self):
         body = build_workflow(7, 11, 12, snapshot_id=SNAPSHOT)
         nodes = {node["id"]: node["data"] for node in body["data"]["nodes"]}

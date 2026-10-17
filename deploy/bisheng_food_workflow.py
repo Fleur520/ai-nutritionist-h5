@@ -209,14 +209,34 @@ def main(evidence, selection):
 
 
 def _param(key, value, kind="var", **extra):
-    return {"key": key, "value": value, "type": kind, **extra}
+    # These are editor fields, even though the execution API only needs values.
+    # v1.3.1's OutputForm reads options.map unconditionally; its slider also
+    # requires bounds. Omitting them produces a runnable but unopenable flow.
+    labels = {
+        "guide_word": "开场白", "guide_question": "引导问题", "chat_history": "历史消息条数",
+        "preset_question": "预置问题列表", "form_input": "上传餐食照片",
+        "model_id": "模型", "temperature": "温度", "system_prompt": "系统提示词",
+        "user_prompt": "用户提示词", "image_prompt": "图片变量",
+        "output_user": "将输出结果展示在会话中", "output": "输出变量",
+        "code_input": "输入参数", "code": "执行代码", "code_output": "输出参数",
+        "message": "消息内容", "output_result": "交互类型",
+    }
+    metadata = {"label": labels.get(key, key)}
+    if kind == "output_form":
+        metadata.update(options=[], **{"global": "value.type=input"})
+    elif kind == "slide":
+        metadata.update(scope=[0, 2], step=0.1)
+    elif kind == "var" and key == "output":
+        metadata["global"] = "code:value.map(el => ({ label: el.label, value: el.key }))"
+    return {"key": key, "value": value, "type": kind, **metadata, **extra}
 
 
 def _node(node_id, kind, name, params, x, y, *, version=1, tab=None):
     data = {"id": node_id, "type": kind, "name": name, "description": name,
             "v": str(version), "group_params": [{"name": "配置", "params": params}]}
     if tab:
-        data["tab"] = {"value": tab, "options": [{"label": tab, "key": tab}]}
+        label = {"single": "单次运行", "form_input": "表单输入"}.get(tab, tab)
+        data["tab"] = {"value": tab, "options": [{"label": label, "key": tab}]}
     return {"id": node_id, "type": "flowNode", "position": {"x": x, "y": y}, "data": data}
 
 
@@ -280,7 +300,8 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
         _param("system_prompt", visual_system, "var_textarea"),
         _param("user_prompt", "识别这张餐食图片中的食物，返回指定JSON。", "var_textarea"),
         _param("image_prompt", ["input_meal.meal_image_files"], "image_prompt"),
-        _param("output_user", False, "switch"), _param("output", [], "var"),
+        _param("output_user", False, "switch"),
+        _param("output", [{"key": "output", "label": "模型输出"}], "var"),
     ], 800, 0, version=2, tab="single")
     parse = _code_node("code_foods", "校验视觉输出并逐菜检索", PARSE_VISION_CODE,
                        [_ref("vision", "llm_vision.output"), _literal("max_items", max_items)],
@@ -299,7 +320,7 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
         _param("system_prompt", "你负责判断图像识别菜品是否与候选数据库食品相同。仅使用该项candidates里的food_code。名称、生熟或做法不一致、不明确、无候选时food_code必须为null；禁止仅凭向量检索命中就确认匹配。严格保持顺序，不增删食物。只输出JSON：{\"items\":[{\"index\":0,\"food_code\":null}]}。不要输出候选、证据、热量或其他字段。", "var_textarea"),
         _param("user_prompt", "逐项校对以下识别结果和知识库候选：\n{{#code_evidence.matching_json#}}", "var_textarea"),
         _param("image_prompt", [], "image_prompt"), _param("output_user", False, "switch"),
-        _param("output", [], "var"),
+        _param("output", [{"key": "output", "label": "模型输出"}], "var"),
     ], 2800, 0, version=2, tab="single"))
     nodes.append(_code_node("code_result", "验证食品编码并附原始检索证据", FINALIZE_CODE,
                            [_ref("evidence", "code_evidence.evidence_json"), _ref("selection", "llm_match.output")],
@@ -309,6 +330,18 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
         _param("output_result", {"type": "", "value": ""}, "output_form"),
     ], 3600, 0, version=2))
     nodes.append(_node("end_food", "end", "结束", [], 4000, 0))
+
+    # The native code-input widget displays label independently of value. Keep
+    # the runtime reference intact while making its source visible to editors.
+    names = {node["id"]: node["data"]["name"] for node in nodes}
+    for node in nodes:
+        for group in node["data"]["group_params"]:
+            for param in group["params"]:
+                if param["type"] == "code_input":
+                    for field in param["value"]:
+                        if field["type"] == "ref":
+                            source, _, variable = field["value"].partition(".")
+                            field["label"] = names[source] + "/" + variable
 
     pairs = [("start_food", "input_meal"), ("input_meal", "llm_vision"), ("llm_vision", "code_foods"),
              ("code_foods", "code_retrieve"), ("code_retrieve", "code_evidence")]
