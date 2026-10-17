@@ -12,13 +12,13 @@ flowchart TB
  N --> P[FastAPI :8000]
  P --> D[(SQLite + 本地图片)]
  P -->|普通咨询 SSE| Q[Qwen / vLLM]
- P -->|拍照识别| Q
- P -->|仅 7/30 日健康报告| B[BiSheng 1.3.1 Workflow]
+ P -->|拍照识别，可配置| B[BiSheng 1.3.1 Workflow]
+ P -->|可选 7/30 日健康报告| B
  B --> K[BiSheng 现有 RAG 营养知识库]
 ```
 
 - **首页**：今日摄入汇总、拍照、营养咨询和报告入口。
-- **拍照**：上传 JPG/PNG/WebP → 多模态识别候选食物 → 人工选择标准食物/重量 → SQLite 成分表计算 → 保存。
+- **拍照**：上传 JPG/PNG/WebP → BiSheng 识别并检索食品知识库（也支持直接模型模式）→ 应用数据库复核编码与做法 → 人工确认食物/重量 → 成分表计算与保存。详见 [餐食识别接入说明](docs/BISHENG_FOOD_RECOGNITION.md)。
 - **AI 咨询**：FastAPI 直接调用 vLLM `/v1/chat/completions` SSE，携带用户档案及最近 12 条会话消息，**不经过 BiSheng**。
 - **饮食记录**：每日三餐记录和统计；按 `Asia/Shanghai` 日期聚合。
 - **报告**：FastAPI 汇总近 7/30 日数据 → `BiSheng 1.3.1 /api/v2/workflow/invoke` → 保存报告文本和统计快照 → H5 展示历史。
@@ -115,7 +115,7 @@ curl http://172.16.10.3:18080/api/health
 | `POST /api/auth/register`、`/login` | 注册 / 登录 |
 | `GET/PUT /api/profile` | 个人档案 |
 | `POST /api/images`、`GET /api/images/{id}` | 上传、鉴权后查看图片 |
-| `POST /api/meals/recognize` | Qwen 多模态食物识别 |
+| `POST /api/meals/recognize` | 按配置使用 BiSheng 食品知识库识别或直接模型识别 |
 | `GET /api/foods` | 标准食物成分表 |
 | `POST /api/meals`、`GET /api/meals` | 保存与查询饮食记录 |
 | `GET /api/nutrition/summary?days=7` | 日期聚合（Asia/Shanghai） |
@@ -128,7 +128,7 @@ curl http://172.16.10.3:18080/api/health
 
 详细协议/输入节点/输出节点说明见 [`docs/BISHENG_WORKFLOW.md`](docs/BISHENG_WORKFLOW.md)。1.3.1 官方开放接口 `POST /api/v2/workflow/invoke` 支持 `stream=false` 返回 `data.events`。如使用 Input 节点，服务端会先产生 `input` 事件，应用需要带同一个 `session_id` 二次发送 `input`；已按该行为编写适配器并用模拟响应做测试。
 
-由于尚未获得你部署的具体工作流 UUID、输入 Key 和返回数据，**不能把“适配器通过模拟测试”当成“真实 BiSheng 已联调”**。需要用你的真实服务进行验收。
+食品图片工作流及知识库已在目标 BiSheng 创建，配置、数据来源和验收要求见 [餐食识别接入说明](docs/BISHENG_FOOD_RECOGNITION.md)。健康报告使用另一套可选配置，当前仍未启用。
 
 ## 四、测试与本地开发
 

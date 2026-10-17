@@ -22,7 +22,14 @@ class Settings(BaseSettings):
     app_max_ai_concurrency: int = 10
     app_reports_enabled: bool = True
     app_revision: str = 'local'
-    # BiSheng 1.3.1 is only called for nutrition report generation.
+    # Keep report generation separate from the image recognition workflow.
+    food_recognition_provider: Literal['direct', 'bisheng'] = 'direct'
+    bisheng_recognition_base_url: str = ''
+    bisheng_recognition_workflow_id: str = ''
+    bisheng_recognition_api_key: str = ''
+    bisheng_recognition_input_field: Literal['input', 'user_input'] = 'input'
+    bisheng_recognition_image_key: str = 'meal_image'
+    bisheng_recognition_timeout: int = Field(240, ge=30, le=280)
     bisheng_report_url: str = ''
     bisheng_report_api_key: str = ''
     bisheng_report_workflow_id: str = ''

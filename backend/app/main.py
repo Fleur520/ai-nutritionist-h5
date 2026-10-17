@@ -15,6 +15,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .ai import chat_chunks, recognize_image
+from .bisheng_recognition import recognize_workflow_image
+from .recognition_matching import resolve_recognized_items
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
@@ -169,13 +171,19 @@ async def recognize(body:dict,user:str=Depends(current_user)):
     if not r: raise HTTPException(404,'图片不存在')
     await ai_slot()
     try:
-        items=await recognize_image(Path(r['path']),r['mime'])
-        catalog=await catalog_rows()
-        valid_codes={food['code'] for food in catalog}
-        for item in items:
-            if item.get('food_code') not in valid_codes:
-                item['food_code']=match_food(item['name'],catalog)
-        return {'items':items,'notice':'食物与分量需人工确认；食品库中的 AI 估算值未经实验核验，菜品会随配料和用油变化。'}
+        use_workflow=settings.food_recognition_provider=='bisheng' and not settings.demo_mode
+        if use_workflow:
+            recognized=await recognize_workflow_image(Path(r['path']),r['mime'])
+            items=resolve_recognized_items(recognized,await catalog_rows())
+        else:
+            items=await recognize_image(Path(r['path']),r['mime'])
+            catalog=await catalog_rows()
+            valid_codes={food['code'] for food in catalog}
+            for item in items:
+                if item.get('food_code') not in valid_codes:
+                    item['food_code']=match_food(item['name'],catalog)
+        return {'items':items,'source':'bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct',
+                'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
     finally:
         AI_SEM.release()
 
