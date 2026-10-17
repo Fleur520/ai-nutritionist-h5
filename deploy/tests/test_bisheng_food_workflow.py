@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bisheng_food_workflow import (build_workflow, PARSE_VISION_CODE,
-                                   RETRIEVE_QA_CODE, COLLECT_EVIDENCE_CODE, FINALIZE_CODE, main)
+                                   RETRIEVE_DOCUMENT_CODE, COLLECT_EVIDENCE_CODE, FINALIZE_CODE, main)
 
 
 SNAPSHOT = "a" * 64
@@ -44,19 +44,33 @@ def answer(code="rice", preparation="煮熟", **overrides):
                        "record_sha256": hashlib.sha256(canonical.encode()).hexdigest()}, ensure_ascii=False)
 
 
-def matches(*raw_answers):
-    return [{"raw_answer": raw, "score": 0.5} for raw in raw_answers]
+def matches(*raw_records):
+    return [{"raw_record": raw, "score": 0.5} for raw in raw_records]
 
 
-def native_retriever(fake_store, calls):
+def native_retriever(fake_store, calls, knowledge_type=0):
     """Load exact native code with only the two server-only dependencies stubbed."""
     def instantiate(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(vectorstore=fake_store)
-    modules = {"bisheng.interface.initialize.loading": SimpleNamespace(instantiate_vectorstore=instantiate),
+    modules = {"bisheng.database.models.knowledge": SimpleNamespace(KnowledgeDao=SimpleNamespace(query_by_id=lambda _: SimpleNamespace(type=knowledge_type))),
+               "bisheng.interface.initialize.loading": SimpleNamespace(instantiate_vectorstore=instantiate),
                "bisheng.interface.vector_store.custom": SimpleNamespace(MilvusWithPermissionCheck=object)}
     with patch.dict(sys.modules, modules):
-        return code_main(RETRIEVE_QA_CODE)
+        return code_main(RETRIEVE_DOCUMENT_CODE)
+
+
+def document(raw=None, **metadata_overrides):
+    row = json.loads(raw or answer())
+    text = '食物名称：白米饭\n数据库唯一食品代码 food_code：' + row['record']['code']
+    extra = dict(snapshot_id=row['snapshot_id'], record_sha256=row['record_sha256'],
+                 record_json=json.dumps(row['record'], ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+                 document_format='nutritionist_food_document_v1',
+                 content_sha256=hashlib.sha256(text.encode()).hexdigest())
+    metadata = dict(knowledge_id='7', file_id=123, chunk_index=2, source='食品营养-001.txt',
+                    extra=json.dumps(extra, ensure_ascii=False))
+    metadata.update(metadata_overrides)
+    return SimpleNamespace(page_content=text, metadata=metadata)
 
 
 class WorkflowGeneratorTests(unittest.TestCase):
@@ -95,7 +109,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertEqual(get("llm_vision")["image_prompt"], ["input_meal.meal_image_files"])
         retrieve_inputs = {row["key"]: row["value"] for row in get("code_retrieve")["code_input"]}
         self.assertEqual(retrieve_inputs, {"items": "code_foods.items", "knowledge_id": 7,
-                                          "score_threshold": 0.3, "top_k": 8})
+                                          "score_threshold": 0.1, "top_k": 8})
         self.assertIn({"source": "code_foods", "target": "code_retrieve"},
                       [{"source": e["source"], "target": e["target"]} for e in body["data"]["edges"]])
         self.assertEqual(get("output_food")["message"]["msg"], "{{#code_result.result#}}")
@@ -147,7 +161,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertEqual(original["candidates"][0]["food_code"], "rice")
         self.assertEqual(original["candidates"][0]["kcal"], 116)
         self.assertIs(original["candidates"][0]["verified"], False)
-        self.assertEqual(original["retrieval_evidence"][0]["raw_answer"], raw)
+        self.assertEqual(original["retrieval_evidence"][0]["raw_record"], raw)
         self.assertEqual(original["retrieval_evidence"][0]["knowledge_id"], 7)
         self.assertEqual(json.loads(collected["evidence_json"]), collected["evidence"])
 
@@ -174,13 +188,15 @@ class WorkflowGeneratorTests(unittest.TestCase):
         entry = result["items"][0]["retrieval_evidence"][0]
         self.assertEqual(entry["record_sha256"], evidence["items"][0]["retrieval_evidence"][0]["record_sha256"])
         self.assertEqual(entry["knowledge_id"], 7)
-        self.assertNotIn("raw_answer", entry)
-        self.assertIn("raw_answer", evidence["items"][0]["retrieval_evidence"][0])
+        self.assertNotIn("raw_record", entry)
+        self.assertIn("raw_record", evidence["items"][0]["retrieval_evidence"][0])
 
-    def test_full_meal_output_fits_bisheng_mysql_text_without_duplicated_qa_records(self):
+    def test_full_meal_output_fits_bisheng_mysql_text_without_duplicated_document_records(self):
         items = [{"name": "测试餐盘食物" + str(i), "preparation": "煮熟", "estimated_grams": 150} for i in range(8)]
-        retrieved = [[{"raw_answer": answer(code="food" + str(j), name="数据库食物" + str(j),
-                                            batch_id="generation-provenance-" * 100), "score": 0.6}
+        retrieved = [[{"raw_record": answer(code="food" + str(j), name="数据库食物" + str(j),
+                                            batch_id="generation-provenance-" * 100), "score": 0.6,
+                       "file_id": 12345, "chunk_index": 99, "document_name": "食品营养-021.txt",
+                       "content_sha256": "c" * 64}
                       for j in range(8)] for _ in items]
         evidence = code_main(COLLECT_EVIDENCE_CODE)(items, retrieved, 7, SNAPSHOT)["evidence"]
         selection = {"items": [{"index": i, "food_code": "food1"} for i in range(8)]}
@@ -202,29 +218,40 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertIsNone(result["items"][0]["food_code"])
         self.assertEqual(result["items"][0]["retrieval_evidence"], [])
 
-    def test_native_retrieval_uses_same_fixed_qa_store_and_top_eight_per_real_food(self):
+    def test_native_retrieval_uses_same_document_store_and_top_eight_per_real_food(self):
         queries, calls = [], []
         raw = answer()
         def search(query, k):
             queries.append((query, k))
-            return [(SimpleNamespace(metadata={"knowledge_id": "7", "extra": json.dumps({"answer": raw})}), 0.53),
-                    (SimpleNamespace(metadata={"knowledge_id": "7", "extra": json.dumps({"answer": raw})}), 0.8)]
+            return [(document(raw), 0.53), (document(raw), 0.8)]
         retrieve = native_retriever(SimpleNamespace(similarity_search_with_score=search), calls)
         items = [{"name": "米饭", "preparation": "蒸熟"}, {"name": "宫保鸡丁", "preparation": "炒熟"}]
         result = retrieve(items, 7, 0.3, 8)
         self.assertEqual(queries, [("米饭，蒸熟", 8), ("宫保鸡丁，炒熟", 8)])
-        self.assertEqual(len(result["answers"]), 2)
-        self.assertEqual(len(result["answers"][0]), 1)
-        self.assertAlmostEqual(result["answers"][0][0]["score"], 0.47)
-        self.assertEqual(result["answers"][0][0]["raw_answer"], raw)
+        self.assertEqual(len(result["documents"]), 2)
+        self.assertEqual(len(result["documents"][0]), 1)
+        self.assertAlmostEqual(result["documents"][0][0]["score"], 0.47)
+        self.assertEqual(json.loads(result["documents"][0][0]["raw_record"]), json.loads(raw))
+        self.assertEqual(result["documents"][0][0]["file_id"], 123)
+        self.assertEqual(result["documents"][0][0]["chunk_index"], 2)
         self.assertEqual(calls[0]["node_type"], "MilvusWithPermissionCheck")
         self.assertEqual(calls[0]["params"]["collection_name"], [{"key": 7, "label": "food"}])
-        self.assertIs(calls[0]["params"]["_is_check_auth"], False)
+        self.assertIs(calls[0]["params"]["_is_check_auth"], True)
+
+    def test_native_retrieval_rejects_qa_library_and_changed_document(self):
+        retrieve = native_retriever(None, [], knowledge_type=1)
+        with self.assertRaisesRegex(ValueError, '文档知识库'):
+            retrieve([{'name': '米饭'}], 7, 0.3, 8)
+        tampered = document()
+        tampered.page_content += '\n伪造营养'
+        retrieve = native_retriever(SimpleNamespace(similarity_search_with_score=lambda *a, **kw: [(tampered, 0.5)]), [])
+        with self.assertRaisesRegex(ValueError, '校验不一致'):
+            retrieve([{'name': '米饭'}], 7, 0.3, 8)
 
     def test_empty_items_do_not_initialize_store_or_embed_fake_queries(self):
         calls = []
         retrieve = native_retriever(None, calls)
-        self.assertEqual(retrieve([], 7, 0.3, 8), {"answers": []})
+        self.assertEqual(retrieve([], 7, 0.3, 8), {"documents": []})
         self.assertEqual(calls, [])
 
     def test_native_empty_query_fails_without_searching(self):
@@ -234,7 +261,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
             retrieve([{"name": "   "}], 7, 0.3, 8)
         self.assertEqual(queries, [])
 
-    def test_native_retrieval_rejects_foreign_or_malformed_qa_metadata(self):
+    def test_native_retrieval_rejects_foreign_or_malformed_document_metadata(self):
         for metadata in ({"knowledge_id": "8", "extra": json.dumps({"answer": answer()})},
                          {"extra": json.dumps({"answer": answer()})},
                          {"knowledge_id": "7", "extra": "[]"},
@@ -255,13 +282,13 @@ class WorkflowGeneratorTests(unittest.TestCase):
 
     def test_candidates_keep_score_order_and_deduplicate_same_food(self):
         raw_rice, raw_millet = answer(), answer("millet", name="小米饭")
-        retrieved = [{"raw_answer": raw_rice, "score": 0.4},
-                     {"raw_answer": raw_millet, "score": 0.6},
-                     {"raw_answer": raw_rice, "score": 0.5}]
+        retrieved = [{"raw_record": raw_rice, "score": 0.4},
+                     {"raw_record": raw_millet, "score": 0.6},
+                     {"raw_record": raw_rice, "score": 0.5}]
         result = code_main(COLLECT_EVIDENCE_CODE)([{"name": "米饭"}], [retrieved], 7, SNAPSHOT)["evidence"]["items"][0]
         self.assertEqual([row["food_code"] for row in result["candidates"]], ["millet", "rice"])
         self.assertEqual([row["retrieval_score"] for row in result["candidates"]], [0.6, 0.5])
-        self.assertEqual([row["raw_answer"] for row in result["retrieval_evidence"]], [raw_millet, raw_rice])
+        self.assertEqual([row["raw_record"] for row in result["retrieval_evidence"]], [raw_millet, raw_rice])
 
     def test_matcher_projection_keeps_food_identity_and_drops_nutrition_and_evidence(self):
         raw = answer(aliases=["大米饭", "米饭"])
@@ -271,31 +298,31 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertEqual(projection, {"items": [{"index": 0, "name": "米饭", "preparation": "蒸熟", "candidates": [
             {"food_code": "rice", "name": "白米饭", "preparation": "煮熟", "aliases": ["大米饭", "米饭"]}]}]})
         for key in ("estimated_grams", "kcal", "protein", "fat", "carbs", "source_type", "verified",
-                    "record_sha256", "snapshot_id", "raw_answer", "retrieval_evidence", "retrieval_score"):
+                    "record_sha256", "snapshot_id", "raw_record", "retrieval_evidence", "retrieval_score"):
             self.assertNotIn('"' + key + '"', collected["matching_json"])
         full = json.loads(collected["evidence_json"])["items"][0]
         self.assertEqual(full["estimated_grams"], 150)
         self.assertEqual(full["candidates"][0]["kcal"], 116)
-        self.assertEqual(full["retrieval_evidence"][0]["raw_answer"], raw)
+        self.assertEqual(full["retrieval_evidence"][0]["raw_record"], raw)
 
     def test_conflicting_records_with_same_code_are_rejected(self):
         with self.assertRaises(ValueError):
             code_main(COLLECT_EVIDENCE_CODE)([{"name": "米饭"}], [matches(answer(), answer(kcal=999))], 7, SNAPSHOT)
 
     def test_candidate_evidence_rejects_malformed_scores_rows_and_counts(self):
-        for rows in ([{"raw_answer": answer(), "score": True}], [{"raw_answer": answer(), "score": float("nan")}],
-                     [{"raw_answer": answer(), "score": -0.1}], [{"raw_answer": answer(), "score": 1.5}],
-                     ["invalid"], [{"raw_answer": answer()}], matches(*[answer()] * 9)):
+        for rows in ([{"raw_record": answer(), "score": True}], [{"raw_record": answer(), "score": float("nan")}],
+                     [{"raw_record": answer(), "score": -0.1}], [{"raw_record": answer(), "score": 1.5}],
+                     ["invalid"], [{"raw_record": answer()}], matches(*[answer()] * 9)):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 code_main(COLLECT_EVIDENCE_CODE)([{"name": "米饭"}], [rows], 7, SNAPSHOT)
 
     def test_full_native_code_chain_can_select_second_retrieved_food(self):
         raw_rice, raw_millet = answer(), answer("millet", name="薏米饭")
         def search(query, k):
-            return [(SimpleNamespace(metadata={"knowledge_id": "7", "extra": json.dumps({"answer": raw})}), distance)
+            return [(document(raw), distance)
                     for raw, distance in ((raw_millet, 0.528), (raw_rice, 0.533))]
         parsed = code_main(PARSE_VISION_CODE)('{"items":[{"name":"米饭","preparation":"蒸熟","estimated_grams":150}]}', 8)
-        answers = native_retriever(SimpleNamespace(similarity_search_with_score=search), [])(parsed["items"], 7, 0.3, 8)["answers"]
+        answers = native_retriever(SimpleNamespace(similarity_search_with_score=search), [])(parsed["items"], 7, 0.3, 8)["documents"]
         collected = code_main(COLLECT_EVIDENCE_CODE)(parsed["items"], answers, 7, SNAPSHOT)
         result = json.loads(code_main(FINALIZE_CODE)(collected["evidence_json"], '{"items":[{"index":0,"food_code":"rice"}]}')["result"])
         self.assertEqual(result["items"][0]["food_code"], "rice")

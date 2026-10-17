@@ -1,9 +1,9 @@
 """Generate a BiSheng 1.3.1 food workflow without contacting the platform.
 
-The native QA retriever fixes k=1, which loses valid foods ranked below first.
-A native Code node uses that same QA vector store to retrieve up to eight actual
-QA answers per food, then deterministically preserves their evidence around the
-matching LLM. The API call and answer metadata were verified on BiSheng 1.3.1.
+An explicit Code node retrieves up to eight actual document chunks per food
+using BiSheng's document vector store. Original food records and chunk hashes
+are checked before the matching LLM can select a food code. The native RAG node
+only exposes generated answers downstream, so it cannot supply this evidence.
 Requires a working default embedding model, Milvus/ES and image parser in BiSheng.
 """
 from __future__ import annotations
@@ -45,8 +45,10 @@ def main(vision, max_items):
 '''
 
 
-RETRIEVE_QA_CODE = '''import json
+RETRIEVE_DOCUMENT_CODE = '''import json
 import math
+import hashlib
+from bisheng.database.models.knowledge import KnowledgeDao
 from bisheng.interface.initialize.loading import instantiate_vectorstore
 from bisheng.interface.vector_store.custom import MilvusWithPermissionCheck
 
@@ -58,12 +60,15 @@ def main(items, knowledge_id, score_threshold, top_k):
     if isinstance(score_threshold, bool) or not isinstance(score_threshold, (int, float)) or not math.isfinite(score_threshold) or not 0.01 <= score_threshold <= 0.99:
         raise ValueError("知识库候选阈值无效")
     if not items:
-        return {"answers": []}
+        return {"documents": []}
+    knowledge = KnowledgeDao.query_by_id(knowledge_id)
+    if knowledge is None or knowledge.type != 0:
+        raise ValueError("必须配置食品文档知识库，不能使用QA知识库")
     params = {"collection_name": [{"key": knowledge_id, "label": "food"}], "user_name": "admin",
-              "_is_check_auth": False, "search_kwargs": {"k": top_k}}
+              "_is_check_auth": True, "search_kwargs": {"k": top_k}}
     retriever = instantiate_vectorstore(node_type="MilvusWithPermissionCheck", class_object=MilvusWithPermissionCheck, params=params)
     store = retriever.vectorstore
-    answers = []
+    documents = []
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
             raise ValueError("逐菜检索问题不能为空")
@@ -82,13 +87,25 @@ def main(items, knowledge_id, score_threshold, top_k):
             if not isinstance(metadata, dict) or str(metadata.get("knowledge_id")) != str(knowledge_id):
                 raise ValueError("知识库候选不属于指定食品知识库")
             extra = json.loads(metadata.get("extra", ""))
-            raw = extra.get("answer") if isinstance(extra, dict) else None
-            if not isinstance(raw, str) or not raw:
-                raise ValueError("知识库候选缺少原始QA答案")
-            rows.append({"raw_answer": raw, "score": score})
+            if not isinstance(extra, dict) or extra.get("document_format") != "nutritionist_food_document_v1" or not isinstance(extra.get("record_json"), str):
+                raise ValueError("文档候选缺少原始食品记录元数据")
+            record = json.loads(extra["record_json"])
+            if not isinstance(record, dict):
+                raise ValueError("食品文档原始记录格式无效")
+            text = doc.page_content
+            if not isinstance(text, str) or hashlib.sha256(text.encode("utf-8")).hexdigest() != extra.get("content_sha256"):
+                raise ValueError("食品文档内容与元数据校验不一致")
+            if ("数据库唯一食品代码 food_code：" + str(record.get("code"))) not in text.splitlines():
+                raise ValueError("食品文档编码与原始记录不一致")
+            if type(metadata.get("file_id")) is not int or metadata["file_id"] <= 0 or type(metadata.get("chunk_index")) is not int or metadata["chunk_index"] < 0:
+                raise ValueError("食品文档缺少文件或分块标识")
+            raw = json.dumps({"record": record, "snapshot_id": extra.get("snapshot_id"), "record_sha256": extra.get("record_sha256")}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            rows.append({"raw_record": raw, "score": score, "file_id": metadata["file_id"],
+                         "chunk_index": metadata["chunk_index"], "document_name": metadata.get("source", ""),
+                         "content_sha256": extra["content_sha256"]})
         rows.sort(key=lambda row: row["score"], reverse=True)
-        answers.append(rows[:top_k])
-    return {"answers": answers}
+        documents.append(rows[:top_k])
+    return {"documents": documents}
 '''
 
 
@@ -97,12 +114,12 @@ import hashlib
 import re
 import math
 
-def main(items, answers, knowledge_id, snapshot_id):
-    if not isinstance(items, list) or not isinstance(answers, list) or len(items) != len(answers) or len(items) > 8:
+def main(items, documents, knowledge_id, snapshot_id):
+    if not isinstance(items, list) or not isinstance(documents, list) or len(items) != len(documents) or len(items) > 8:
         raise ValueError("检索结果数量无效")
     evidence_items = []
     for index, item in enumerate(items):
-        retrieved = answers[index]
+        retrieved = documents[index]
         evidence = []
         candidates = []
         seen = {}
@@ -115,16 +132,16 @@ def main(items, answers, knowledge_id, snapshot_id):
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0.01 <= score <= 1.000001:
                 raise ValueError("知识库候选相关度无效")
         for match in sorted(retrieved, key=lambda row: row["score"], reverse=True):
-            raw = match.get("raw_answer")
+            raw = match.get("raw_record")
             score = match.get("score")
             if not isinstance(raw, str) or len(raw) > 100000:
-                raise ValueError("知识库答案格式无效")
+                raise ValueError("知识库食品记录格式无效")
             try:
                 answer = json.loads(raw)
             except (TypeError, ValueError):
-                raise ValueError("知识库答案必须为食品记录JSON")
+                raise ValueError("知识库元数据必须为食品记录JSON")
             if not isinstance(answer, dict) or not isinstance(answer.get("record"), dict):
-                raise ValueError("知识库答案缺少record")
+                raise ValueError("知识库元数据缺少record")
             record = answer["record"]
             canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             record_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -149,8 +166,9 @@ def main(items, answers, knowledge_id, snapshot_id):
             candidate.update(food_code=code, snapshot_id=actual_snapshot, record_sha256=record_hash, retrieval_score=score)
             candidates.append(candidate)
             evidence.append({"food_code": code, "knowledge_id": knowledge_id, "snapshot_id": actual_snapshot,
-                             "record_sha256": record_hash, "source": "bisheng_qa", "raw_answer": raw,
-                             "retrieval_score": score})
+                             "record_sha256": record_hash, "source": "bisheng_document", "raw_record": raw,
+                             "retrieval_score": score,
+                             **{key: match[key] for key in ("file_id", "chunk_index", "document_name", "content_sha256") if key in match}})
         row = dict(item)
         row.update(candidates=candidates, retrieval_evidence=evidence)
         evidence_items.append(row)
@@ -187,7 +205,7 @@ def main(evidence, selection):
         if code is not None and (not isinstance(code, str) or code not in allowed):
             raise ValueError("匹配食品编码不属于该菜检索结果")
         # BiSheng 1.3.1 persists the output event in a MySQL TEXT column.
-        # Full QA answers stay in the knowledge/evidence step. The H5 reads
+        # Full document records stay in the knowledge/evidence step. The H5 reads
         # nutrition and provenance from its live DB, so return only identities
         # and evidence fingerprints rather than duplicating complete records.
         row = {key: original[key] for key in ("name", "preparation", "estimated_grams") if key in original}
@@ -197,7 +215,7 @@ def main(evidence, selection):
             for candidate in original["candidates"]
         ]
         row["retrieval_evidence"] = [
-            {key: entry[key] for key in ("food_code", "knowledge_id", "snapshot_id", "record_sha256", "source") if key in entry}
+            {key: entry[key] for key in ("food_code", "knowledge_id", "snapshot_id", "record_sha256", "source", "file_id", "chunk_index", "document_name", "content_sha256") if key in entry}
             for entry in original["retrieval_evidence"]
         ]
         result["items"].append(row)
@@ -258,12 +276,12 @@ def _literal(key, value):
 
 
 def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
-                   *, snapshot_id: str, max_items: int = 8, score_threshold: float = 0.3,
+                   *, snapshot_id: str, max_items: int = 8, score_threshold: float = 0.1,
                    name: str = "食光餐食识别与食品热量检索") -> dict:
     """Return the POST /api/v1/workflow/create body, initially offline.
 
-    QA answers must be JSON {record, snapshot_id, record_sha256} from
-    backend.app.knowledge_export. The workflow does not create/import a KB.
+    Import document batches from backend.app.knowledge_export into a type=0
+    document KB first. The workflow does not create/import a KB.
     The threshold must be calibrated with the deployed embedding model.
     """
     for label, number in (("knowledge_id", knowledge_id), ("vision_model_id", vision_model_id),
@@ -307,12 +325,13 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
                        [_ref("vision", "llm_vision.output"), _literal("max_items", max_items)],
                        [("items", "list")], 1200, 0)
     nodes = [start, input_node, vision, parse]
-    nodes.append(_code_node("code_retrieve", "逐菜检索食品知识库前8候选", RETRIEVE_QA_CODE,
+    nodes.append(_code_node("code_retrieve", "检索食品文档库（前8候选）", RETRIEVE_DOCUMENT_CODE,
                            [_ref("items", "code_foods.items"), _literal("knowledge_id", knowledge_id),
                             _literal("score_threshold", score_threshold), _literal("top_k", 8)],
-                           [("answers", "list")], 1600, 0))
+                           [("documents", "list")], 1600, 0))
+    nodes[-1]["data"]["description"] = f"文档知识库 ID：{knowledge_id}；每道菜按名称和做法向量检索；阈值 {score_threshold}；最多8条；校验食品编码、原文和快照。"
     nodes.append(_code_node("code_evidence", "校验目录并保留检索证据", COLLECT_EVIDENCE_CODE,
-                           [_ref("items", "code_foods.items"), _ref("answers", "code_retrieve.answers"),
+                           [_ref("items", "code_foods.items"), _ref("documents", "code_retrieve.documents"),
                             _literal("knowledge_id", knowledge_id), _literal("snapshot_id", snapshot_id)],
                            [("evidence_json", "str"), ("matching_json", "str")], 2400, 0))
     nodes.append(_node("llm_match", "llm", "判断菜品与数据库食品是否一致", [
@@ -362,7 +381,7 @@ def main(argv=None):
     parser.add_argument("--text-model-id", type=int, required=True)
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--max-items", type=int, default=8)
-    parser.add_argument("--score-threshold", type=float, default=0.3)
+    parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--name", default="食光餐食识别与食品热量检索")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
