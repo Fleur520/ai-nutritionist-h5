@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -164,6 +165,7 @@ async def read_image(image_id:str,user:str=Depends(current_user)):
 
 @app.post('/api/meals/recognize')
 async def recognize(body:dict,user:str=Depends(current_user)):
+    started=time.perf_counter()
     image_id=body.get('image_id','')
     async with connect() as db:
         cur=await db.execute('SELECT path,mime FROM images WHERE id=? AND user_id=?',(image_id,user))
@@ -182,7 +184,10 @@ async def recognize(body:dict,user:str=Depends(current_user)):
             for item in items:
                 if item.get('food_code') not in valid_codes:
                     item['food_code']=match_food(item['name'],catalog)
-        return {'items':items,'source':'bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct',
+        elapsed_ms=round((time.perf_counter()-started)*1000)
+        source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
+        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items))
+        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,
                 'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
     finally:
         AI_SEM.release()

@@ -7,7 +7,8 @@ import FoodPicker from '../components/FoodPicker.vue'
 const emit = defineEmits<{ go: [value: string] }>()
 const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
 const foods = ref<Food[]>([]), foodsLoading = ref(true), foodsError = ref('')
-const items = ref<(Recognized & { food_code: string; originalFoodCode?: string; manualSelection?: boolean })[]>([])
+const items = ref<(Recognized & { food_code: string; rowId: number; originalFoodCode?: string; manualSelection?: boolean })[]>([])
+let nextRowId=0
 const foodsByCode = computed(() => new Map(foods.value.map(food => [food.code, food])))
 const uploadRequest = new AbortController()
 let disposed = false
@@ -83,7 +84,7 @@ const complete = computed(() => items.value.length > 0 && calculatedCount.value 
 function add() {
   if (busy.value || saving.value) return
   if (items.value.length >= 30) { error.value = '一餐最多记录 30 项食物。'; return }
-  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '' })
+  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '', rowId:++nextRowId })
 }
 function upload() { if (!busy.value && !saving.value) fileRef.value?.click() }
 async function onFile(event: Event) {
@@ -101,9 +102,11 @@ async function onFile(event: Event) {
     const form = new FormData(); form.append('file', file)
     const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
     imageId.value = result.id
-    const recognized = await api<{ items: Recognized[]; notice: string }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
-    items.value = recognized.items.map(item => ({ ...item, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false }))
-    notice.value = recognized.notice
+    const recognized = await api<{ items: Recognized[]; notice: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
+    items.value = recognized.items.map(item => ({ ...item, rowId:++nextRowId, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false,
+      match_status: item.match_status || (item.food_code ? 'matched' : 'no_evidence') }))
+    const count=items.value.filter(item=>item.food_code).length
+    notice.value = `已匹配 ${count}/${items.value.length} 项${recognized.elapsed_ms ? ` · 用时 ${(recognized.elapsed_ms/1000).toFixed(1)} 秒` : ''}。` + recognized.notice
   } catch (failure) {
     if (!uploadRequest.signal.aborted) error.value = failure instanceof Error ? failure.message : '照片识别失败，请重试或手动添加食物。'
   } finally { busy.value = false }
@@ -134,7 +137,7 @@ async function save() {
     <div v-if="foodsError" class="error food-load-error" role="alert"><span>{{ foodsError }}</span><button type="button" class="text-action" @click="loadFoods"><RefreshCw :size="16" />重试</button></div>
     <div class="section-header"><div><h2>{{ items.length ? '确认食物与分量' : '这一餐吃了什么' }}</h2><p class="section-copy">估算会有偏差，你可以随时调整</p></div><button type="button" class="text-action" @click="add" :disabled="busy || saving || items.length >= 30"><Plus :size="17" />手动添加</button></div>
     <div v-if="!items.length && !busy" class="empty-state scan-empty"><Utensils :size="28" /><strong>记录自己的饮食节奏</strong><p>拍照后，食物会出现在这里。<br />也可以直接手动添加。</p></div>
-    <article v-for="(item, index) in items" :key="index" class="food-item">
+    <article v-for="(item, index) in items" :key="item.rowId" class="food-item">
       <div class="food-head"><div><span class="food-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ item.name }}</strong></div><button type="button" class="icon-button" :aria-label="'删除' + item.name" :disabled="saving" @click="items.splice(index, 1)"><Trash2 :size="18" /></button></div>
       <div v-if="hasMatchingInfo(item)" class="matching-info" aria-live="polite">
         <template v-if="selectedFood(item)">
@@ -152,7 +155,7 @@ async function save() {
           </div>
         </template>
       </div>
-      <FoodPicker :model-value="item.food_code" :foods="foods" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
+      <FoodPicker :model-value="item.food_code" :foods="foods" :initial-query="!item.food_code && hasMatchingInfo(item) ? item.name : ''" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
       <div class="weight-row"><label>估计重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5" inputmode="decimal" :disabled="saving" :aria-invalid="!validWeight(item)" /></label><div class="item-calories"><span>这份食物</span><strong>{{ itemEnergy(item) === null ? '—' : energyText(itemEnergy(item) || 0) }}<small> kcal</small></strong></div></div>
       <p class="food-energy" :class="{ pending: itemEnergy(item) === null }" aria-live="polite">
         <template v-if="!selectedFood(item)">请选择对应食物，再计算这一份的能量。</template>
