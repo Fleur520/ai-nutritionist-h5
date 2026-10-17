@@ -2,9 +2,9 @@
 import { computed, ref } from 'vue'
 import { Search, SlidersHorizontal } from 'lucide-vue-next'
 import type { Food } from '../lib/api'
-const props = defineProps<{ foods: Food[]; modelValue: string; disabled?: boolean }>()
+const props = defineProps<{ foods: Food[]; modelValue: string; disabled?: boolean; initialQuery?: string }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
-const query = ref(''), category = ref('')
+const query = ref(props.initialQuery || ''), category = ref('')
 const categories = computed(() => [...new Set(props.foods.map(food => food.category || '原有食品'))].sort())
 const clean = (value: string) => value.toLowerCase().replace(/[\s（）()·、，,]/g, '')
 const matches = computed(() => {

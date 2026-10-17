@@ -28,6 +28,8 @@ _PREFIXES = (
     ('蒸', '蒸熟'), ('煮', '煮熟'), ('炒', '炒熟'),
     ('煎', '煎熟'), ('烤', '烤熟'), ('炸', '炸熟'), ('炖', '炖熟'),
 )
+_SHAPE_FOODS = {'土豆', '马铃薯', '玉米', '胡萝卜', '白萝卜', '莲藕', '黄瓜',
+                '西葫芦', '山药', '紫薯', '红薯', '牛肉', '猪肉', '羊肉', '鸡肉', '鸡胸肉', '鸭肉'}
 _PUBLIC_FIELDS = (
     'code', 'name', 'kcal', 'protein', 'fat', 'carbs', 'category',
     'preparation', 'basis_g', 'aliases', 'source_type', 'source_model',
@@ -91,10 +93,17 @@ def _base_name(name, preparation):
         return match.group(0)[0] + '，'.join(kept) + match.group(0)[-1] if kept else ''
     name = re.sub(r'[（(]([^()（）]+)[）)]', remove_state, name)
     for prefix, state in _PREFIXES:
-        if preparation == state and name.startswith(prefix) and len(name) > len(prefix) + 1:
-            name = name[len(prefix):]
-            break
-    return normalize_name(name)
+        if preparation == state and name.startswith(prefix):
+            ingredient=name[len(prefix):]
+            if len(ingredient)>1 or ingredient in {'虾','鱼','蛋','藕','笋'}:
+                name=ingredient
+                break
+    name = normalize_name(name)
+    # Cutting shape does not change a plain ingredient's identity. Only this
+    # closed ingredient list qualifies; never strip recipe words or qualifiers.
+    if len(name) > 1 and name[-1] in '片丝丁块段粒条' and name[:-1] in _SHAPE_FOODS:
+        name = name[:-1]
+    return name
 
 
 def _name_rank(name, food, expected):
@@ -173,6 +182,11 @@ def resolve_recognized_items(items: list[dict], catalog: list[dict]) -> list[dic
         }
         if 'preparation' in item:
             result['preparation'] = item['preparation']
+        # Keep actual document provenance available to the UI/diagnostics. The
+        # adapter has already bounded and whitelisted these fields.
+        for key in ('retrieval_evidence', 'snapshot_id'):
+            if key in item:
+                result[key] = deepcopy(item[key])
         evidence, candidates, stale = _retrieved_candidates(item, by_code)
         result['candidates'] = [_public_food(food) for food in candidates.values()]
         selected = item.get('food_code')

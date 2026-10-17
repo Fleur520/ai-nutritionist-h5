@@ -178,6 +178,41 @@ def test_empty_recognition_is_valid(catalog):
     assert resolve_recognized_items([], catalog) == []
 
 
+def test_live_resolution_preserves_document_trace_without_replacing_db_nutrition(catalog):
+    evidence={'food_code':'rice','knowledge_id':202,'source':'bisheng_document',
+              'file_id':123,'chunk_index':4,'content_sha256':'c'*64,'record_sha256':'b'*64}
+    result=resolve(catalog,retrieval_evidence=[evidence],snapshot_id='a'*64)
+    assert result['retrieval_evidence']==[evidence]
+    assert result['snapshot_id']=='a'*64
+    assert result['matched_food']==catalog[0]
+    result['retrieval_evidence'][0]['file_id']=999
+    assert evidence['file_id']==123
+
+
+@pytest.mark.parametrize('visual,canonical,state', [
+    ('虾', '煎虾', '煎熟'),
+    ('玉米段', '煮玉米', '煮熟'), ('土豆片', '水煮土豆', '煮熟'),
+    ('土豆块', '炖土豆', '炖熟'), ('胡萝卜丝', '清炒胡萝卜', '炒熟'),
+])
+def test_plain_ingredient_cutting_shape_preserves_identity(catalog, visual, canonical, state):
+    food={**catalog[0], 'code':'shape', 'name':canonical, 'preparation':state, 'aliases':[]}
+    catalog.append(food)
+    result=resolve(catalog,name=visual,preparation=state,retrieved_codes=['shape'])
+    assert result['food_code']=='shape' and result['match_status']=='matched'
+
+
+@pytest.mark.parametrize('visual,state,canonical,actual', [
+    ('土豆片','煎熟','口蘑炒土豆片','炒熟'),
+    ('玉米段','煮熟','玉米粥','煮熟'),
+    ('土豆片','煎熟','水煮土豆','煮熟'),
+    ('牛肉片','煎熟','孜然牛肉','炒熟'),
+    ('土豆泥','即食','水煮土豆','煮熟'),
+])
+def test_shape_matching_never_discards_recipe_or_changes_cooking_method(catalog,visual,state,canonical,actual):
+    catalog.append({**catalog[0],'code':'shape','name':canonical,'preparation':actual,'aliases':[]})
+    assert resolve(catalog,name=visual,preparation=state,retrieved_codes=['shape'])['food_code'] is None
+
+
 @pytest.fixture
 def legacy_catalog(catalog):
     catalog.append({

@@ -9,10 +9,12 @@ Requires a working default embedding model, Milvus/ES and image parser in BiShen
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
 from pathlib import Path
 import re
+import textwrap
 
 
 PARSE_VISION_CODE = '''import json
@@ -49,6 +51,7 @@ RETRIEVE_DOCUMENT_CODE = '''import json
 import math
 import hashlib
 from bisheng.database.models.knowledge import KnowledgeDao
+from concurrent.futures import ThreadPoolExecutor
 from bisheng.interface.initialize.loading import instantiate_vectorstore
 from bisheng.interface.vector_store.custom import MilvusWithPermissionCheck
 
@@ -68,7 +71,7 @@ def main(items, knowledge_id, score_threshold, top_k):
               "_is_check_auth": True, "search_kwargs": {"k": top_k}}
     retriever = instantiate_vectorstore(node_type="MilvusWithPermissionCheck", class_object=MilvusWithPermissionCheck, params=params)
     store = retriever.vectorstore
-    documents = []
+    queries = []
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
             raise ValueError("逐菜检索问题不能为空")
@@ -76,8 +79,20 @@ def main(items, knowledge_id, score_threshold, top_k):
         if not isinstance(preparation, str):
             raise ValueError("逐菜检索制作状态无效")
         query = item["name"].strip() + ("，" + preparation.strip() if preparation.strip() else "")
+        queries.append(query)
+    # The v1.3.1 string-search wrapper embeds each query twice. Its vector
+    # entrypoint already embeds with the selected collection model and applies
+    # the same permission/partition filters. Avoid that duplicate call, bound
+    # concurrency, and keep map order aligned with the visual food list.
+    def search(query):
+        return store.similarity_search_with_score_by_vector([], query=query, k=top_k, timeout=20)
+    unique = list(dict.fromkeys(queries))
+    with ThreadPoolExecutor(max_workers=min(4, len(unique))) as executor:
+        results = dict(zip(unique, executor.map(search, unique)))
+    documents = []
+    for query in queries:
         rows = []
-        for doc, distance in store.similarity_search_with_score(query, k=top_k):
+        for doc, distance in results[query]:
             if isinstance(distance, bool) or not math.isfinite(float(distance)) or float(distance) < -0.000001:
                 raise ValueError("知识库返回的检索距离无效")
             score = 1.0 - float(distance)
@@ -226,6 +241,36 @@ def main(evidence, selection):
 '''
 
 
+def _fast_finalize_code():
+    """Embed the same pure matcher used by the API in a native Code node.
+
+    BiSheng executes top-level functions with separate global/local maps. Nest
+    the pure module inside main so its helpers share a real Python closure.
+    No model is needed to choose between names/aliases/preparations already
+    checked again by the API. Keep the old finalizer for explicit rollback.
+    """
+    root = Path(__file__).resolve().parents[1] / 'backend' / 'app'
+    source = (root / 'recognition_matching.py').read_text(encoding='utf-8')
+    parts = [ast.get_source_segment(source, node) for node in ast.parse(source).body
+             if isinstance(node, (ast.Assign, ast.FunctionDef))]
+    food = (root / 'food_catalog.py').read_text(encoding='utf-8')
+    normalize = next(ast.get_source_segment(food, node) for node in ast.parse(food).body
+                     if isinstance(node, ast.FunctionDef) and node.name == 'normalize_name')
+    finalizer = FINALIZE_CODE.replace('import json\n', '', 1).replace('def main(evidence, selection):', 'def finish(evidence, selection):', 1)
+    body = '\n\n'.join([normalize, *parts, finalizer])
+    return ('def main(evidence):\n'
+            '    import json\n    import re\n    import unicodedata\n    from copy import deepcopy\n'
+            + textwrap.indent(body, '    ') + '\n'
+            '    original = json.loads(evidence)\n'
+            '    catalog = {c["food_code"]: c for row in original["items"] for c in row["candidates"]}\n'
+            '    resolved = resolve_recognized_items(original["items"], list(catalog.values()))\n'
+            '    selected = {"items": [{"index": i, "food_code": row["food_code"]} for i, row in enumerate(resolved)]}\n'
+            '    return finish(evidence, json.dumps(selected, ensure_ascii=False))\n')
+
+
+FAST_FINALIZE_CODE = _fast_finalize_code()
+
+
 def _param(key, value, kind="var", **extra):
     # These are editor fields, even though the execution API only needs values.
     # v1.3.1's OutputForm reads options.map unconditionally; its slider also
@@ -334,16 +379,11 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
                            [_ref("items", "code_foods.items"), _ref("documents", "code_retrieve.documents"),
                             _literal("knowledge_id", knowledge_id), _literal("snapshot_id", snapshot_id)],
                            [("evidence_json", "str"), ("matching_json", "str")], 2400, 0))
-    nodes.append(_node("llm_match", "llm", "判断菜品与数据库食品是否一致", [
-        _param("model_id", text_model_id, "bisheng_model"), _param("temperature", 0.0, "slide"),
-        _param("system_prompt", "你负责判断图像识别菜品是否与候选数据库食品相同。仅使用该项candidates里的food_code。名称、生熟或做法不一致、不明确、无候选时food_code必须为null；禁止仅凭向量检索命中就确认匹配。严格保持顺序，不增删食物。只输出JSON：{\"items\":[{\"index\":0,\"food_code\":null}]}。不要输出候选、证据、热量或其他字段。", "var_textarea"),
-        _param("user_prompt", "逐项校对以下识别结果和知识库候选：\n{{#code_evidence.matching_json#}}", "var_textarea"),
-        _param("image_prompt", [], "image_prompt"), _param("output_user", False, "switch"),
-        _param("output", [{"key": "output", "label": "模型输出"}], "var"),
-    ], 2800, 0, version=2, tab="single"))
-    nodes.append(_code_node("code_result", "验证食品编码并附原始检索证据", FINALIZE_CODE,
-                           [_ref("evidence", "code_evidence.evidence_json"), _ref("selection", "llm_match.output")],
-                           [("result", "str")], 3200, 0))
+    # Retain the legacy model definition only in source history. Candidate
+    # matching now uses the same deterministic identity rules as the API.
+    nodes.append(_code_node("code_result", "匹配食品编码（名称、别名与做法）", FAST_FINALIZE_CODE,
+                           [_ref("evidence", "code_evidence.evidence_json")],
+                           [("result", "str")], 2800, 0))
     nodes.append(_node("output_food", "output", "返回食品编码与热量检索结果", [
         _param("message", {"msg": "{{#code_result.result#}}", "files": []}, "var_textarea_file"),
         _param("output_result", {"type": "", "value": ""}, "output_form"),
@@ -364,8 +404,7 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
 
     pairs = [("start_food", "input_meal"), ("input_meal", "llm_vision"), ("llm_vision", "code_foods"),
              ("code_foods", "code_retrieve"), ("code_retrieve", "code_evidence")]
-    pairs.extend([("code_evidence", "llm_match"),
-                  ("llm_match", "code_result"), ("code_result", "output_food"), ("output_food", "end_food")])
+    pairs.extend([("code_evidence", "code_result"), ("code_result", "output_food"), ("output_food", "end_food")])
     edges = [{"id": f"{source}-{target}", "source": source, "target": target,
               "sourceHandle": "right_handle", "targetHandle": "left_handle", "type": "customEdge"}
              for source, target in pairs]

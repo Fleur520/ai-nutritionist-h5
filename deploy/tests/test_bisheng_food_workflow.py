@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bisheng_food_workflow import (build_workflow, PARSE_VISION_CODE,
-                                   RETRIEVE_DOCUMENT_CODE, COLLECT_EVIDENCE_CODE, FINALIZE_CODE, main)
+                                   RETRIEVE_DOCUMENT_CODE, COLLECT_EVIDENCE_CODE, FINALIZE_CODE, FAST_FINALIZE_CODE, main)
 
 
 SNAPSHOT = "a" * 64
@@ -52,6 +52,8 @@ def native_retriever(fake_store, calls, knowledge_type=0):
     """Load exact native code with only the two server-only dependencies stubbed."""
     def instantiate(**kwargs):
         calls.append(kwargs)
+        if fake_store is not None and not hasattr(fake_store,'similarity_search_with_score_by_vector'):
+            fake_store.similarity_search_with_score_by_vector=lambda embedding,query,k,timeout: fake_store.similarity_search_with_score(query,k)
         return SimpleNamespace(vectorstore=fake_store)
     modules = {"bisheng.database.models.knowledge": SimpleNamespace(KnowledgeDao=SimpleNamespace(query_by_id=lambda _: SimpleNamespace(type=knowledge_type))),
                "bisheng.interface.initialize.loading": SimpleNamespace(instantiate_vectorstore=instantiate),
@@ -74,6 +76,42 @@ def document(raw=None, **metadata_overrides):
 
 
 class WorkflowGeneratorTests(unittest.TestCase):
+    def test_parallel_retrieval_deduplicates_and_preserves_food_order(self):
+        import threading
+        import time
+        calls=[]
+        active=0
+        peak=0
+        lock=threading.Lock()
+        def search(embedding,query,k,timeout):
+            nonlocal active,peak
+            with lock:
+                calls.append(query);active+=1;peak=max(peak,active)
+            time.sleep(.01 if query.endswith('1') else .02)
+            with lock:active-=1
+            return [(document(answer(code=query,name=query)),.5)]
+        retrieve=native_retriever(SimpleNamespace(similarity_search_with_score_by_vector=search),[])
+        names=['food1','food2','food1','food3','food4','food5','food6','food7']
+        result=retrieve([{'name':n} for n in names],7,.1,8)['documents']
+        self.assertEqual([json.loads(rows[0]['raw_record'])['record']['code'] for rows in result],names)
+        self.assertEqual(sorted(calls),sorted(set(names)))
+        self.assertLessEqual(peak,4)
+        self.assertGreater(peak,1)
+
+    def test_fast_matcher_maps_cutting_shape_and_keeps_document_evidence(self):
+        raw=answer('corn',name='煮玉米',preparation='煮熟',aliases=[])
+        evidence=code_main(COLLECT_EVIDENCE_CODE)([{'name':'玉米段','preparation':'煮熟','estimated_grams':80}], [matches(raw)],7,SNAPSHOT)['evidence_json']
+        result=json.loads(code_main(FAST_FINALIZE_CODE)(evidence)['result'])['items'][0]
+        self.assertEqual(result['food_code'],'corn')
+        self.assertEqual(result['retrieval_evidence'][0]['food_code'],'corn')
+        self.assertNotIn('kcal',result['candidates'][0])
+
+    def test_fast_matcher_does_not_select_different_recipe_or_preparation(self):
+        raw=answer('mushroom_potato',name='口蘑炒土豆片',preparation='炒熟',aliases=[])
+        evidence=code_main(COLLECT_EVIDENCE_CODE)([{'name':'土豆片','preparation':'煎熟','estimated_grams':60}], [matches(raw)],7,SNAPSHOT)['evidence_json']
+        result=json.loads(code_main(FAST_FINALIZE_CODE)(evidence)['result'])['items'][0]
+        self.assertIsNone(result['food_code'])
+
     def test_editor_controls_have_native_required_metadata_and_output_variables(self):
         body = build_workflow(7, 11, 12, snapshot_id=SNAPSHOT)
         for node in body["data"]["nodes"]:
@@ -100,7 +138,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertEqual(body["status"], 1)
         self.assertEqual(body["flow_type"], 10)
         self.assertNotIn("qa_retriever", [node["type"] for node in nodes.values()])
-        self.assertEqual(len(nodes), 10)
+        self.assertEqual(len(nodes), 9)
         get = lambda node: {p["key"]: p["value"] for group in nodes[node]["group_params"] for p in group["params"]}
         self.assertEqual(nodes["input_meal"]["tab"]["value"], "form_input")
         form = get("input_meal")["form_input"][0]
@@ -113,7 +151,8 @@ class WorkflowGeneratorTests(unittest.TestCase):
         self.assertIn({"source": "code_foods", "target": "code_retrieve"},
                       [{"source": e["source"], "target": e["target"]} for e in body["data"]["edges"]])
         self.assertEqual(get("output_food")["message"]["msg"], "{{#code_result.result#}}")
-        self.assertIn("{{#code_evidence.matching_json#}}", get("llm_match")["user_prompt"])
+        self.assertNotIn('llm_match',nodes)
+        self.assertEqual(sum(node['type']=='llm' for node in nodes.values()),1)
         self.assertEqual(get("code_result")["code_input"][0]["value"], "code_evidence.evidence_json")
         for node in nodes.values():
             if node["type"] == "code":
