@@ -130,6 +130,33 @@ def test_upload_nested_user_input_and_same_session_roundtrip(configured, monkeyp
     assert 'api_key' not in items[0]
 
 
+def test_document_provenance_survives_adapter_without_document_body(configured, monkeypatch):
+    _, photo = configured
+    payload = result_payload()
+    entry = payload['items'][0]['retrieval_evidence'][0]
+    entry.pop('raw_answer')
+    entry.update(source='bisheng_document', file_id=123, chunk_index=5,
+                 document_name='食品营养-001.txt', content_sha256='c' * 64,
+                 raw_record='must not propagate', page_content='must not propagate')
+    install_transport(monkeypatch, rounds=[response([input_event()]), response(output_events(payload))])
+    evidence = run(photo)[0]['retrieval_evidence'][0]
+    assert evidence['source'] == 'bisheng_document'
+    assert (evidence['file_id'], evidence['chunk_index']) == (123, 5)
+    assert evidence['document_name'] == '食品营养-001.txt'
+    assert evidence['content_sha256'] == 'c' * 64
+    assert 'raw_record' not in evidence and 'page_content' not in evidence
+
+
+@pytest.mark.parametrize('changes', [dict(file_id=True), dict(file_id=0), dict(chunk_index=-1),
+                                  dict(content_sha256='bad'), dict(document_name='x' * 201)])
+def test_document_evidence_invalid_location_or_digest_fails_closed(configured, monkeypatch, changes):
+    _, photo = configured
+    payload = result_payload()
+    payload['items'][0]['retrieval_evidence'][0].update(changes)
+    install_transport(monkeypatch, rounds=[response([input_event()]), response(output_events(payload))])
+    assert_failure(photo)
+
+
 def test_input_alias_config_and_optional_gateway_key(configured, monkeypatch):
     settings, photo = configured
     settings.bisheng_recognition_input_field = 'input'

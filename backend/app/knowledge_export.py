@@ -24,7 +24,8 @@ FIELDS = (
     'basis_g', 'verified',
 )
 RECORD_SEPARATOR = '\n\n<<<NUTRITIONIST_FOOD_RECORD_END>>>\n\n'
-FILENAMES = ('food_documents.jsonl', 'food_catalog.txt', 'qa_records.jsonl', 'manifest.json')
+FILENAMES = ('food_documents.jsonl', 'food_catalog.txt', 'qa_records.jsonl',
+             'bisheng_document_batches.json', 'manifest.json')
 UNITS = {'kcal': 'kcal/100g', 'protein': 'g/100g', 'fat': 'g/100g', 'carbs': 'g/100g'}
 
 
@@ -101,13 +102,39 @@ def build_documents(rows):
             f'生成模型 source_model：{row["source_model"] or "未记录"}',
             f'生成批次 batch_id：{row["batch_id"] or "未记录"}',
             '使用规则：只做候选检索；不将别名相同当作菜品相同；生熟不明或多候选不能强行选择；以业务数据库最新记录为准。',
-            f'原始记录 JSON：{canonical(row)}',
-            f'记录校验 record_sha256：{record_hash}',
-            f'目录版本 snapshot_id：{snapshot_id}',
         ))
+        # Index readable food descriptions, not duplicate JSON and hash strings.
+        # The original record travels in document metadata, never as a QA answer.
+        # Keep canonical numbers in a string: JavaScript clients otherwise
+        # serialize 52.0 as 52 and invalidate the original record fingerprint.
+        metadata.update(record_json=canonical(row), content_sha256=sha256(content),
+                        document_format='nutritionist_food_document_v1')
         documents.append({'document_id': f'food:{row["code"]}', 'record': row,
                           'page_content': content, 'metadata': metadata})
     return snapshot_id, documents
+
+
+def build_bisheng_document_batches(documents, batch_size=100):
+    """Presegmented documents for BiSheng v1.3.1 /filelib/chunks_string.
+
+    Its implementation splits each Document at double newlines with size 1000.
+    Fail before import if a record could be split from its metadata. Each batch
+    becomes a readable TXT file; each food remains exactly one indexed chunk.
+    """
+    if type(batch_size) is not int or not 1 <= batch_size <= 100:
+        raise ValueError('Document batch size must be between 1 and 100')
+    batches = []
+    for start in range(0, len(documents), batch_size):
+        filename = f'食品营养-{start // batch_size + 1:03d}.txt'
+        entries = []
+        for document in documents[start:start + batch_size]:
+            text = document['page_content']
+            if len(text) > 1000 or '\n\n' in text:
+                raise ValueError('Food document would be split by BiSheng; shorten display fields first')
+            entries.append({'page_content': text,
+                            'metadata': dict(document['metadata'], source=filename)})
+        batches.append({'filename': filename, 'documents': entries})
+    return batches
 
 
 def validate_output_directory(output):
@@ -183,11 +210,14 @@ def write_export(rows, output):
         'food_documents.jsonl': ''.join(canonical(document) + '\n' for document in documents),
         'food_catalog.txt': RECORD_SEPARATOR.join(document['page_content'] for document in documents),
         'qa_records.jsonl': ''.join(canonical(record) + '\n' for record in build_qa_records(documents)),
+        'bisheng_document_batches.json': canonical(build_bisheng_document_batches(documents)) + '\n',
     }
     manifest = {
         'schema_version': 1, 'origin': 'nutritionist_db', 'snapshot_id': snapshot_id,
         'total': len(documents), 'basis_g': 100, 'nutrition_units': UNITS,
         'qa_total': len(documents), 'qa_answer_format': 'json(record,snapshot_id,record_sha256)',
+        'document_format': 'nutritionist_food_document_v1',
+        'document_files': (len(documents) + 99) // 100,
         'fields': list(FIELDS), 'split_separator': RECORD_SEPARATOR,
         'min_chunk_characters': min(len(document['page_content']) for document in documents),
         'max_chunk_characters': max(len(document['page_content']) for document in documents),

@@ -46,11 +46,37 @@ def test_record_metadata_and_body_preserve_provenance_and_original_fields():
         assert document['metadata']['snapshot_id'] == snapshot
         for field in ('preparation', 'source_type', 'source_model', 'batch_id', 'basis_g', 'verified'):
             assert document['metadata'][field] == row[field]
-        assert knowledge.canonical(row) in document['page_content']
+        assert json.loads(document['metadata']['record_json']) == row
+        assert document['metadata']['record_json'] == knowledge.canonical(row)
+        assert document['metadata']['content_sha256'] == knowledge.sha256(document['page_content'])
+        assert knowledge.canonical(row) not in document['page_content']
         assert '每100克可食部分' in document['page_content']
         assert '未经核验' in document['page_content']
     assert '未知（原数据未填写）' in documents[1]['page_content']
     assert rows == foods()  # The export never mutates source rows.
+
+
+def test_document_import_batches_keep_one_food_per_chunk_and_human_readable_files():
+    _, documents = knowledge.build_documents(foods())
+    batches = knowledge.build_bisheng_document_batches(documents, batch_size=1)
+    assert len(batches) == 2
+    for batch, document in zip(batches, documents):
+        entry, = batch['documents']
+        assert entry['metadata']['source'] == batch['filename']
+        assert json.loads(entry['metadata']['record_json']) == document['record']
+        assert entry['metadata']['document_format'] == 'nutritionist_food_document_v1'
+        assert entry['page_content'] == document['page_content']
+        assert len(entry['page_content']) <= 1000
+        assert '\n\n' not in entry['page_content']
+        assert '原始记录 JSON' not in entry['page_content']
+
+
+def test_document_import_rejects_platform_split_risk_before_any_writes(tmp_path):
+    rows = foods()
+    rows[0]['aliases'] = ['x' * 1100]
+    with pytest.raises(ValueError, match='would be split'):
+        knowledge.write_export(rows, tmp_path / 'not-created')
+    assert not (tmp_path / 'not-created').exists()
 
 
 def test_extra_fields_cannot_export_user_data_or_secrets():

@@ -23,7 +23,8 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_ROUNDS = 3
 _ERROR_MESSAGE = 'BiSheng 食物识别工作流执行失败，请重试或手动记录'
 _CANDIDATE_FIELDS = ('code', 'food_code', 'name', 'preparation', 'basis_g', 'snapshot_id', 'record_sha256')
-_EVIDENCE_FIELDS = ('food_code', 'knowledge_id', 'snapshot_id', 'record_sha256', 'source', 'raw_answer')
+_EVIDENCE_FIELDS = ('food_code', 'knowledge_id', 'snapshot_id', 'record_sha256', 'source', 'raw_answer',
+                    'file_id', 'chunk_index', 'document_name', 'content_sha256')
 
 
 def _configuration():
@@ -103,7 +104,7 @@ def _candidate(value):
         _bounded_text(result['preparation'], 32, empty=True)
     if 'basis_g' in result and (type(result['basis_g']) not in {int, float} or result['basis_g'] != 100):
         raise ValueError('candidate nutrition basis is not 100g')
-    for key in ('snapshot_id', 'record_sha256'):
+    for key in ('snapshot_id', 'record_sha256', 'content_sha256'):
         if key in result:
             _hash(result[key])
     return result
@@ -119,13 +120,18 @@ def _evidence(value):
         or isinstance(result['knowledge_id'], str) and 0 < len(result['knowledge_id']) <= 100
     ):
         raise ValueError('invalid knowledge ID')
-    for key in ('snapshot_id', 'record_sha256'):
+    for key in ('snapshot_id', 'record_sha256', 'content_sha256'):
         if key in result:
             _hash(result[key])
     if 'source' in result:
         _bounded_text(result['source'], 64)
     if 'raw_answer' in result:
         _bounded_text(result['raw_answer'], 100000)
+    if 'document_name' in result:
+        _bounded_text(result['document_name'], 200)
+    for key, minimum in (('file_id', 1), ('chunk_index', 0)):
+        if key in result and (type(result[key]) is not int or result[key] < minimum):
+            raise ValueError('invalid document location')
     return result
 
 
