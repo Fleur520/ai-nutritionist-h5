@@ -71,6 +71,11 @@ class WorkflowGeneratorTests(unittest.TestCase):
                 if param["type"] == "slide":
                     self.assertEqual(param["scope"], [0, 2])
                     self.assertGreater(param["step"], 0)
+                if param["type"] == "code_input":
+                    for field in param["value"]:
+                        if field["type"] == "ref":
+                            self.assertTrue(field["label"])
+                            self.assertTrue(field["label"].endswith("/" + field["value"].partition(".")[2]))
             if node["data"]["type"] == "llm":
                 self.assertEqual(params["output"]["value"], [{"key": "output", "label": "模型输出"}])
                 self.assertIn("value.map", params["output"]["global"])

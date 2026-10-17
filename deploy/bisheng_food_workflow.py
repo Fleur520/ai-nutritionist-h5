@@ -331,6 +331,18 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
     ], 3600, 0, version=2))
     nodes.append(_node("end_food", "end", "结束", [], 4000, 0))
 
+    # The native code-input widget displays label independently of value. Keep
+    # the runtime reference intact while making its source visible to editors.
+    names = {node["id"]: node["data"]["name"] for node in nodes}
+    for node in nodes:
+        for group in node["data"]["group_params"]:
+            for param in group["params"]:
+                if param["type"] == "code_input":
+                    for field in param["value"]:
+                        if field["type"] == "ref":
+                            source, _, variable = field["value"].partition(".")
+                            field["label"] = names[source] + "/" + variable
+
     pairs = [("start_food", "input_meal"), ("input_meal", "llm_vision"), ("llm_vision", "code_foods"),
              ("code_foods", "code_retrieve"), ("code_retrieve", "code_evidence")]
     pairs.extend([("code_evidence", "llm_match"),
