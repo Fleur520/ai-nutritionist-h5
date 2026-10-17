@@ -148,8 +148,26 @@ class WorkflowGeneratorTests(unittest.TestCase):
                               "candidates": [{"food_code": "apple"}], "retrieval_evidence": ["fake"]}]}
         result = json.loads(code_main(FINALIZE_CODE)(json.dumps(evidence), json.dumps(forged))["result"])
         self.assertEqual(result["items"][0]["estimated_grams"], 150)
-        self.assertEqual(result["items"][0]["candidates"], evidence["items"][0]["candidates"])
-        self.assertEqual(result["items"][0]["retrieval_evidence"], evidence["items"][0]["retrieval_evidence"])
+        candidate = result["items"][0]["candidates"][0]
+        self.assertEqual(candidate["food_code"], "rice")
+        self.assertNotIn("kcal", candidate)
+        entry = result["items"][0]["retrieval_evidence"][0]
+        self.assertEqual(entry["record_sha256"], evidence["items"][0]["retrieval_evidence"][0]["record_sha256"])
+        self.assertEqual(entry["knowledge_id"], 7)
+        self.assertNotIn("raw_answer", entry)
+        self.assertIn("raw_answer", evidence["items"][0]["retrieval_evidence"][0])
+
+    def test_full_meal_output_fits_bisheng_mysql_text_without_duplicated_qa_records(self):
+        items = [{"name": "测试餐盘食物" + str(i), "preparation": "煮熟", "estimated_grams": 150} for i in range(8)]
+        retrieved = [[{"raw_answer": answer(code="food" + str(j), name="数据库食物" + str(j),
+                                            batch_id="generation-provenance-" * 100), "score": 0.6}
+                      for j in range(8)] for _ in items]
+        evidence = code_main(COLLECT_EVIDENCE_CODE)(items, retrieved, 7, SNAPSHOT)["evidence"]
+        selection = {"items": [{"index": i, "food_code": "food1"} for i in range(8)]}
+        message = code_main(FINALIZE_CODE)(json.dumps(evidence), json.dumps(selection))["result"]
+        persisted = json.dumps({"unique_id": "a" * 32, "node_id": "output_food", "msg": message, "output_key": ""})
+        self.assertLess(len(persisted.encode("utf-8")), 65535)
+        self.assertEqual(len(json.loads(message)["items"][0]["candidates"]), 8)
 
     def test_unretrieved_code_reordering_and_added_food_rejected(self):
         evidence = code_main(COLLECT_EVIDENCE_CODE)([{"name": "米饭", "estimated_grams": 150}], [matches(answer())], 7, SNAPSHOT)["evidence"]

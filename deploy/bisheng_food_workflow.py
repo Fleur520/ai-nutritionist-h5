@@ -186,10 +186,25 @@ def main(evidence, selection):
         allowed = {candidate["food_code"] for candidate in original["candidates"]}
         if code is not None and (not isinstance(code, str) or code not in allowed):
             raise ValueError("匹配食品编码不属于该菜检索结果")
-        row = dict(original)
+        # BiSheng 1.3.1 persists the output event in a MySQL TEXT column.
+        # Full QA answers stay in the knowledge/evidence step. The H5 reads
+        # nutrition and provenance from its live DB, so return only identities
+        # and evidence fingerprints rather than duplicating complete records.
+        row = {key: original[key] for key in ("name", "preparation", "estimated_grams") if key in original}
         row["food_code"] = code
+        row["candidates"] = [
+            {key: candidate[key] for key in ("food_code", "name", "preparation", "basis_g") if key in candidate}
+            for candidate in original["candidates"]
+        ]
+        row["retrieval_evidence"] = [
+            {key: entry[key] for key in ("food_code", "knowledge_id", "snapshot_id", "record_sha256", "source") if key in entry}
+            for entry in original["retrieval_evidence"]
+        ]
         result["items"].append(row)
-    return {"result": json.dumps(result, ensure_ascii=False, separators=(",", ":"))}
+    message = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(json.dumps({"msg": message}, ensure_ascii=True).encode("utf-8")) > 60000:
+        raise ValueError("识别结果超过工作流输出容量，请减少单张图片中的食品数量")
+    return {"result": message}
 '''
 
 
