@@ -190,6 +190,7 @@ def test_live_resolution_preserves_document_trace_without_replacing_db_nutrition
 
 
 @pytest.mark.parametrize('visual,canonical,state', [
+    ('虾', '煎虾', '煎熟'),
     ('玉米段', '煮玉米', '煮熟'), ('土豆片', '水煮土豆', '煮熟'),
     ('土豆块', '炖土豆', '炖熟'), ('胡萝卜丝', '清炒胡萝卜', '炒熟'),
 ])

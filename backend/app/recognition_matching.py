@@ -93,9 +93,11 @@ def _base_name(name, preparation):
         return match.group(0)[0] + '，'.join(kept) + match.group(0)[-1] if kept else ''
     name = re.sub(r'[（(]([^()（）]+)[）)]', remove_state, name)
     for prefix, state in _PREFIXES:
-        if preparation == state and name.startswith(prefix) and len(name) > len(prefix) + 1:
-            name = name[len(prefix):]
-            break
+        if preparation == state and name.startswith(prefix):
+            ingredient=name[len(prefix):]
+            if len(ingredient)>1 or ingredient in {'虾','鱼','蛋','藕','笋'}:
+                name=ingredient
+                break
     name = normalize_name(name)
     # Cutting shape does not change a plain ingredient's identity. Only this
     # closed ingredient list qualifies; never strip recipe words or qualifiers.

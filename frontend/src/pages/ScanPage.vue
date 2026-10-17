@@ -103,6 +103,9 @@ async function onFile(event: Event) {
     const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
     imageId.value = result.id
     const recognized = await api<{ items: Recognized[]; notice: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
+    // A catalog update can add a valid code while this page is already open.
+    // Refresh once before binding, so a correct server match is not invisible.
+    if (recognized.items.some(item=>item.food_code && !foodsByCode.value.has(item.food_code))) await loadFoods()
     items.value = recognized.items.map(item => ({ ...item, rowId:++nextRowId, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false,
       match_status: item.match_status || (item.food_code ? 'matched' : 'no_evidence') }))
     const count=items.value.filter(item=>item.food_code).length
