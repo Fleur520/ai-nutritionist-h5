@@ -1,0 +1,50 @@
+services:
+  vision:
+    image: ${FOOD_VISION_IMAGE:-vllm/vllm-openai:v0.27.1}
+    restart: unless-stopped
+    runtime: nvidia
+    ipc: host
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${FOOD_VISION_GPU_IDS:-4,5,6,7}
+      VLLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in the private server environment}
+    ports:
+      - "${FOOD_VISION_BIND_IP:-172.16.10.3}:${FOOD_VISION_PORT:-19000}:8000"
+    volumes:
+      - ${FOOD_VISION_MODEL_PATH:-/data_1/models/Qwen3.8-27B-FP8}:/models:ro
+    command:
+      - --model
+      - /models
+      - --served-model-name
+      - Qwen3.8-27B-Food
+      - --quantization
+      - fp8
+      - --tensor-parallel-size
+      - "${FOOD_VISION_TENSOR_PARALLEL:-4}"
+      - --pipeline-parallel-size
+      - "1"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-model-len
+      - "8192"
+      - --max-num-seqs
+      - "16"
+      - --max-num-batched-tokens
+      - "16384"
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking":false}'
+      - --override-generation-config
+      - '{"max_new_tokens":1024}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      start_period: 180s
+      interval: 15s
+      timeout: 8s
+      retries: 20

@@ -9,6 +9,7 @@ import logging
 import math
 from pathlib import Path, PurePosixPath
 import re
+import time
 from urllib.parse import urlsplit
 import uuid
 
@@ -208,16 +209,19 @@ async def _stop(client, base_url, workflow_id, session_id, headers):
         log.warning('BiSheng workflow cleanup did not finish')
 
 
-async def recognize_workflow_image(path: Path, mime: str) -> list[dict]:
+async def recognize_workflow_image(path: Path, mime: str, timings: dict | None = None) -> list[dict]:
     """Upload one private photo and consume the published workflow's final output."""
     base_url, workflow, input_field, image_key, timeout, headers = _configuration()
     workflow_id, session_id = str(workflow), ''
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(8, timeout))) as client:
         try:
             async with asyncio.timeout(timeout):
+                phase_started=time.perf_counter()
                 with path.open('rb') as photo:
                     upload = await _post_json(client, base_url + '/api/v1/upload/' + workflow.hex,
                                               files={'file': (path.name, photo, mime)}, headers=headers)
+                if timings is not None:
+                    timings['upload']=round((time.perf_counter()-phase_started)*1000)
                 uploaded_path = upload.get('file_path')
                 if not isinstance(uploaded_path, str) or len(uploaded_path) > 4096 or '\x00' in uploaded_path:
                     raise ValueError('upload did not return a valid file location')
@@ -228,8 +232,11 @@ async def recognize_workflow_image(path: Path, mime: str) -> list[dict]:
                     raise ValueError('upload did not return an absolute path or HTTP URL')
                 payload = {'workflow_id': workflow_id, 'stream': False}
                 submitted_image, seen_inputs = False, set()
-                for _ in range(_MAX_ROUNDS):
+                for round_index in range(_MAX_ROUNDS):
+                    phase_started=time.perf_counter()
                     data = await _post_json(client, base_url + '/api/v2/workflow/invoke', json=payload, headers=headers)
+                    if timings is not None:
+                        timings['invoke_'+str(round_index)]=round((time.perf_counter()-phase_started)*1000)
                     returned_session = _bounded_text(data.get('session_id'), 200)
                     if session_id and session_id != returned_session:
                         raise ValueError('workflow session changed')
@@ -280,7 +287,11 @@ async def recognize_workflow_image(path: Path, mime: str) -> list[dict]:
                         continue
                     if not closed or not submitted_image or len(messages) != 1:
                         raise ValueError('workflow did not finish with one image result')
-                    return _structured_items(messages[0])
+                    phase_started=time.perf_counter()
+                    items=_structured_items(messages[0])
+                    if timings is not None:
+                        timings['validation']=round((time.perf_counter()-phase_started)*1000)
+                    return items
                 raise ValueError('too many workflow input rounds')
         except asyncio.CancelledError:
             await _stop(client, base_url, workflow_id, session_id, headers)

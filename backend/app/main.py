@@ -28,6 +28,7 @@ from .schemas import ChatMessage, Credentials, MealCreate, ProfilePatch
 log=logging.getLogger('nutrition')
 settings=get_settings()
 AI_SEM=asyncio.Semaphore(max(1,settings.app_max_ai_concurrency))
+IMAGE_SEM=asyncio.Semaphore(settings.app_max_image_concurrency)
 Image.MAX_IMAGE_PIXELS=16_000_000
 
 @asynccontextmanager
@@ -128,22 +129,39 @@ async def update_profile(body:ProfilePatch,user:str=Depends(current_user)):
 async def foods(user:str=Depends(current_user)):
     return await catalog_rows()
 
+def encode_uploaded_image(raw:bytes,out:Path):
+    with Image.open(io.BytesIO(raw)) as pic:
+        if pic.format not in {'JPEG','PNG','WEBP'}:
+            raise ValueError('unsupported')
+        pic=ImageOps.exif_transpose(pic)
+        pic.thumbnail((2048,2048))
+        pic=pic.convert('RGB')
+        pic.save(out,format='JPEG',quality=84,optimize=True)
+
+
 @app.post('/api/images',status_code=201)
 async def upload_image(file:UploadFile=File(...),user:str=Depends(current_user)):
     raw=await file.read(5*1024*1024+1)
     if len(raw)>5*1024*1024: raise HTTPException(413,'图片不能超过 5MB')
-    try:
-        with Image.open(io.BytesIO(raw)) as pic:
-            if pic.format not in {'JPEG','PNG','WEBP'}:
-                raise ValueError('unsupported')
-            pic=ImageOps.exif_transpose(pic)
-            pic.thumbnail((2048,2048))
-            pic=pic.convert('RGB')
-            image_id=str(uuid.uuid4())
-            out=(settings.app_media_dir/f'{image_id}.jpg').resolve()
-            pic.save(out,format='JPEG',quality=84,optimize=True)
-    except (UnidentifiedImageError,ValueError,OSError,Image.DecompressionBombError) as exc:
-        raise HTTPException(415,'只支持合法的 JPG/PNG/WebP 图片') from exc
+    image_id=str(uuid.uuid4())
+    out=(settings.app_media_dir/f'{image_id}.jpg').resolve()
+    async with IMAGE_SEM:
+        work=asyncio.create_task(asyncio.to_thread(encode_uploaded_image,raw,out))
+        try:
+            # Shield the bounded worker so cancellation can clean its own file
+            # after encoding finishes instead of leaving a late-written orphan.
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            try:
+                await work
+            except Exception:
+                pass
+            finally:
+                out.unlink(missing_ok=True)
+            raise
+        except (UnidentifiedImageError,ValueError,OSError,Image.DecompressionBombError) as exc:
+            out.unlink(missing_ok=True)
+            raise HTTPException(415,'只支持合法的 JPG/PNG/WebP 图片') from exc
     async with connect() as db:
         await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
                          (image_id,user,str(out),'image/jpeg'))
@@ -172,11 +190,21 @@ async def recognize(body:dict,user:str=Depends(current_user)):
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
     await ai_slot()
+    entered=time.perf_counter()
+    timings={'admission':round((entered-started)*1000)}
     try:
         use_workflow=settings.food_recognition_provider=='bisheng' and not settings.demo_mode
         if use_workflow:
-            recognized=await recognize_workflow_image(Path(r['path']),r['mime'])
-            items=resolve_recognized_items(recognized,await catalog_rows())
+            workflow_timings={}
+            recognized=await recognize_workflow_image(Path(r['path']),r['mime'],workflow_timings)
+            timings.update({'workflow_'+key:value for key,value in workflow_timings.items()})
+            timings['workflow']=round((time.perf_counter()-entered)*1000)
+            stage_started=time.perf_counter()
+            catalog=await catalog_rows()
+            timings['catalog']=round((time.perf_counter()-stage_started)*1000)
+            stage_started=time.perf_counter()
+            items=resolve_recognized_items(recognized,catalog)
+            timings['matching']=round((time.perf_counter()-stage_started)*1000)
         else:
             items=await recognize_image(Path(r['path']),r['mime'])
             catalog=await catalog_rows()
@@ -186,8 +214,8 @@ async def recognize(body:dict,user:str=Depends(current_user)):
                     item['food_code']=match_food(item['name'],catalog)
         elapsed_ms=round((time.perf_counter()-started)*1000)
         source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
-        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items))
-        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,
+        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),timings)
+        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,
                 'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
     finally:
         AI_SEM.release()

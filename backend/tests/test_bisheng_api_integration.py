@@ -94,6 +94,24 @@ def recognition_api(tmp_path, monkeypatch):
             asyncio.run(cleanup())
 
 
+def test_image_encoding_can_overlap_without_blocking_other_uploads(recognition_api, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    barrier=threading.Barrier(2,timeout=5)
+    original=main.encode_uploaded_image
+    threads=set()
+    lock=threading.Lock()
+    def encode(raw,path):
+        with lock:threads.add(threading.get_ident())
+        barrier.wait()
+        original(raw,path)
+    monkeypatch.setattr(main,'encode_uploaded_image',encode)
+    monkeypatch.setattr(main,'IMAGE_SEM',asyncio.Semaphore(2))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids=list(pool.map(lambda _:recognition_api.upload(),range(2)))
+    assert len(set(ids))==2 and len(threads)==2
+
+
 def workflow_item(food):
     return {
         'name': food['name'], 'preparation': '蒸熟', 'estimated_grams': 150,
@@ -116,7 +134,7 @@ def test_workflow_refills_live_database_food_and_saved_meal_nutrition(recognitio
     image_id = api.upload()
     calls = []
 
-    async def workflow(path, mime):
+    async def workflow(path, mime, timings=None):
         calls.append((path, mime))
         assert path.parent == api.settings.app_media_dir
         assert path.is_file() and path.suffix == '.jpg'
@@ -128,6 +146,8 @@ def test_workflow_refills_live_database_food_and_saved_meal_nutrition(recognitio
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['source'] == 'bisheng'
+    assert set(body['timings_ms']) == {'admission', 'workflow', 'catalog', 'matching'}
+    assert all(isinstance(value, int) and value >= 0 for value in body['timings_ms'].values())
     assert len(calls) == 1 and calls[0][1] == 'image/jpeg'
     item = body['items'][0]
     assert item['food_code'] == api.food['code']
