@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 import io
 import json
 import logging
@@ -18,6 +19,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .ai import chat_chunks, recognize_image
 from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
+from .recognition_jobs import RecognitionBusy, RecognitionJobs
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
@@ -29,6 +31,7 @@ log=logging.getLogger('nutrition')
 settings=get_settings()
 AI_SEM=asyncio.Semaphore(max(1,settings.app_max_ai_concurrency))
 IMAGE_SEM=asyncio.Semaphore(settings.app_max_image_concurrency)
+RECOGNITION_JOBS=RecognitionJobs(settings.app_max_ai_concurrency)
 Image.MAX_IMAGE_PIXELS=16_000_000
 
 @asynccontextmanager
@@ -36,7 +39,10 @@ async def lifespan(app: FastAPI):
     await initialize()
     await initialize_catalog()
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
-    yield
+    try:
+        yield
+    finally:
+        await RECOGNITION_JOBS.close()
 
 app=FastAPI(title='AI 营养师 API',version='0.1.0',lifespan=lifespan)
 
@@ -147,21 +153,29 @@ async def upload_image(file:UploadFile=File(...),user:str=Depends(current_user))
     out=(settings.app_media_dir/f'{image_id}.jpg').resolve()
     async with IMAGE_SEM:
         work=asyncio.create_task(asyncio.to_thread(encode_uploaded_image,raw,out))
+        cancelled=False
         try:
-            # Shield the bounded worker so cancellation can clean its own file
-            # after encoding finishes instead of leaving a late-written orphan.
-            await asyncio.shield(work)
-        except asyncio.CancelledError:
-            try:
-                await work
-            except Exception:
-                pass
-            finally:
-                out.unlink(missing_ok=True)
-            raise
+            # Repeated disconnect/shutdown cancellation must not release the
+            # encoding slot or remove the file before the thread finishes.
+            while not work.done():
+                try:
+                    await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    cancelled=True
+            work.result()
         except (UnidentifiedImageError,ValueError,OSError,Image.DecompressionBombError) as exc:
             out.unlink(missing_ok=True)
+            if cancelled:
+                raise asyncio.CancelledError() from None
             raise HTTPException(415,'只支持合法的 JPG/PNG/WebP 图片') from exc
+        except BaseException:
+            out.unlink(missing_ok=True)
+            if cancelled:
+                raise asyncio.CancelledError() from None
+            raise
+        if cancelled:
+            out.unlink(missing_ok=True)
+            raise asyncio.CancelledError()
     async with connect() as db:
         await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
                          (image_id,user,str(out),'image/jpeg'))
@@ -181,6 +195,24 @@ async def read_image(image_id:str,user:str=Depends(current_user)):
                                  'Cache-Control':'private, no-store'},media_type='image/jpeg')
     return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'private, no-store'})
 
+async def recognize_once(path:Path,mime:str,started:float):
+    await ai_slot()
+    entered=time.perf_counter()
+    timings={'admission':round((entered-started)*1000)}
+    try:
+        use_workflow=settings.food_recognition_provider=='bisheng' and not settings.demo_mode
+        if use_workflow:
+            workflow_timings={}
+            recognized=await recognize_workflow_image(path,mime,workflow_timings)
+            timings.update({'workflow_'+key:value for key,value in workflow_timings.items()})
+            timings['workflow']=round((time.perf_counter()-entered)*1000)
+        else:
+            recognized=await recognize_image(path,mime)
+        return recognized,use_workflow,timings
+    finally:
+        AI_SEM.release()
+
+
 @app.post('/api/meals/recognize')
 async def recognize(body:dict,user:str=Depends(current_user)):
     started=time.perf_counter()
@@ -189,36 +221,34 @@ async def recognize(body:dict,user:str=Depends(current_user)):
         cur=await db.execute('SELECT path,mime FROM images WHERE id=? AND user_id=?',(image_id,user))
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
-    await ai_slot()
-    entered=time.perf_counter()
-    timings={'admission':round((entered-started)*1000)}
+    waiting=time.perf_counter()
     try:
-        use_workflow=settings.food_recognition_provider=='bisheng' and not settings.demo_mode
-        if use_workflow:
-            workflow_timings={}
-            recognized=await recognize_workflow_image(Path(r['path']),r['mime'],workflow_timings)
-            timings.update({'workflow_'+key:value for key,value in workflow_timings.items()})
-            timings['workflow']=round((time.perf_counter()-entered)*1000)
-            stage_started=time.perf_counter()
-            catalog=await catalog_rows()
-            timings['catalog']=round((time.perf_counter()-stage_started)*1000)
-            stage_started=time.perf_counter()
-            items=resolve_recognized_items(recognized,catalog)
-            timings['matching']=round((time.perf_counter()-stage_started)*1000)
-        else:
-            items=await recognize_image(Path(r['path']),r['mime'])
-            catalog=await catalog_rows()
-            valid_codes={food['code'] for food in catalog}
-            for item in items:
-                if item.get('food_code') not in valid_codes:
-                    item['food_code']=match_food(item['name'],catalog)
-        elapsed_ms=round((time.perf_counter()-started)*1000)
-        source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
-        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),timings)
-        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,
-                'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
-    finally:
-        AI_SEM.release()
+        result,coalesced=await RECOGNITION_JOBS.run((user,image_id),
+            lambda:recognize_once(Path(r['path']),r['mime'],started))
+    except RecognitionBusy as exc:
+        raise HTTPException(429,'AI 请求繁忙，请稍后再试') from exc
+    recognized,use_workflow,job_timings=result
+    timings=dict(job_timings)
+    if coalesced:
+        timings['shared_wait']=round((time.perf_counter()-waiting)*1000)
+    stage_started=time.perf_counter()
+    catalog=await catalog_rows()
+    timings['catalog']=round((time.perf_counter()-stage_started)*1000)
+    stage_started=time.perf_counter()
+    if use_workflow:
+        items=resolve_recognized_items(recognized,catalog)
+    else:
+        items=deepcopy(recognized)
+        valid_codes={food['code'] for food in catalog}
+        for item in items:
+            if item.get('food_code') not in valid_codes:
+                item['food_code']=match_food(item['name'],catalog)
+    timings['matching']=round((time.perf_counter()-stage_started)*1000)
+    elapsed_ms=round((time.perf_counter()-started)*1000)
+    source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
+    log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d coalesced=%s timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),coalesced,timings)
+    return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,'coalesced':coalesced,
+            'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
 
 @app.post('/api/meals',status_code=201)
 async def add_meal(body:MealCreate,user:str=Depends(current_user)):
