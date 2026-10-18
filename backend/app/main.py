@@ -140,7 +140,7 @@ def encode_uploaded_image(raw:bytes,out:Path):
         if pic.format not in {'JPEG','PNG','WEBP'}:
             raise ValueError('unsupported')
         pic=ImageOps.exif_transpose(pic)
-        pic.thumbnail((2048,2048))
+        pic.thumbnail((settings.app_image_max_edge,settings.app_image_max_edge))
         pic=pic.convert('RGB')
         pic.save(out,format='JPEG',quality=84,optimize=True)
 

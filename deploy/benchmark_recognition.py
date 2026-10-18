@@ -119,7 +119,7 @@ async def benchmark(args):
                     record['status'] = response.status_code
                     if response.status_code == 200:
                         value = response.json()
-                        record.update(source=value['source'], server_elapsed_ms=value.get('elapsed_ms'),timings_ms=value.get('timings_ms'),
+                        record.update(source=value['source'], coalesced=value.get('coalesced',False), server_elapsed_ms=value.get('elapsed_ms'),timings_ms=value.get('timings_ms'),
                                       items=[{key: item.get(key) for key in ('name', 'food_code', 'preparation', 'match_status')}
                                              for item in value['items']])
                     else:
