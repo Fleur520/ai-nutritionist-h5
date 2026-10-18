@@ -35,6 +35,7 @@ def recognition_api(tmp_path, monkeypatch):
     monkeypatch.setattr(database, 'get_settings', lambda: settings)
     monkeypatch.setattr(main, 'settings', settings)
     monkeypatch.setattr(main, 'AI_SEM', asyncio.Semaphore(1))
+    monkeypatch.setattr(main, 'RECOGNITION_JOBS', main.RecognitionJobs(1))
     unique = uuid.uuid4().hex[:12]
     food = {
         'code': 'test_bisheng_' + unique, 'name': '蒸紫薯（接口测试' + unique + '）',
@@ -234,3 +235,44 @@ def test_private_or_missing_image_never_reaches_workflow(recognition_api, monkey
         assert response.json() == {'detail': '图片不存在'}
     api.client.cookies.clear()
     assert api.client.post('/api/meals/recognize', json={'image_id': image_id}).status_code == 401
+
+
+def test_duplicate_recognition_calls_share_one_workflow_then_retry_is_fresh(recognition_api, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    api = recognition_api
+    image_id = api.upload()
+    entered, joined, release = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    original_run = main.RECOGNITION_JOBS.run
+    async def run(key, factory):
+        if key in main.RECOGNITION_JOBS._jobs:
+            joined.set()
+        return await original_run(key, factory)
+    async def workflow(*args):
+        calls.append(True)
+        entered.set()
+        assert await asyncio.to_thread(release.wait, 5)
+        return [workflow_item(api.food)]
+    monkeypatch.setattr(main.RECOGNITION_JOBS, 'run', run)
+    monkeypatch.setattr(main, 'recognize_workflow_image', workflow)
+    reject_direct_call(monkeypatch)
+    def post(): return api.client.post('/api/meals/recognize', json={'image_id': image_id})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(post)
+        assert entered.wait(5)
+        second = pool.submit(post)
+        try:
+            assert joined.wait(5)
+        finally:
+            release.set()
+        responses = [first.result(), second.result()]
+    assert all(response.status_code == 200 for response in responses)
+    bodies = [response.json() for response in responses]
+    assert len(calls) == 1 and sorted(body['coalesced'] for body in bodies) == [False, True]
+    assert bodies[0]['items'] == bodies[1]['items']
+    assert bodies[0]['items'][0]['matched_food'] == api.food
+    assert all(body['source'] == 'bisheng' for body in bodies)
+    assert 'shared_wait' in next(body for body in bodies if body['coalesced'])['timings_ms']
+    retry = post()
+    assert retry.status_code == 200 and retry.json()['coalesced'] is False and len(calls) == 2
