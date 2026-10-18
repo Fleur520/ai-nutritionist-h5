@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     app_media_dir: Path = Path('./data/media')
     app_nginx_accel: bool = False
     app_max_ai_concurrency: int = 10
+    app_max_image_concurrency: int = Field(4, ge=1, le=32)
     app_reports_enabled: bool = True
     app_revision: str = 'local'
     # Keep report generation separate from the image recognition workflow.

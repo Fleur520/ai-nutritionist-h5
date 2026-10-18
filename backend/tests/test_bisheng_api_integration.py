@@ -94,6 +94,24 @@ def recognition_api(tmp_path, monkeypatch):
             asyncio.run(cleanup())
 
 
+def test_image_encoding_can_overlap_without_blocking_other_uploads(recognition_api, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    barrier=threading.Barrier(2,timeout=5)
+    original=main.encode_uploaded_image
+    threads=set()
+    lock=threading.Lock()
+    def encode(raw,path):
+        with lock:threads.add(threading.get_ident())
+        barrier.wait()
+        original(raw,path)
+    monkeypatch.setattr(main,'encode_uploaded_image',encode)
+    monkeypatch.setattr(main,'IMAGE_SEM',asyncio.Semaphore(2))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids=list(pool.map(lambda _:recognition_api.upload(),range(2)))
+    assert len(set(ids))==2 and len(threads)==2
+
+
 def workflow_item(food):
     return {
         'name': food['name'], 'preparation': '蒸熟', 'estimated_grams': 150,
