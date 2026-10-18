@@ -172,11 +172,21 @@ async def recognize(body:dict,user:str=Depends(current_user)):
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
     await ai_slot()
+    entered=time.perf_counter()
+    timings={'admission':round((entered-started)*1000)}
     try:
         use_workflow=settings.food_recognition_provider=='bisheng' and not settings.demo_mode
         if use_workflow:
-            recognized=await recognize_workflow_image(Path(r['path']),r['mime'])
-            items=resolve_recognized_items(recognized,await catalog_rows())
+            workflow_timings={}
+            recognized=await recognize_workflow_image(Path(r['path']),r['mime'],workflow_timings)
+            timings.update({'workflow_'+key:value for key,value in workflow_timings.items()})
+            timings['workflow']=round((time.perf_counter()-entered)*1000)
+            stage_started=time.perf_counter()
+            catalog=await catalog_rows()
+            timings['catalog']=round((time.perf_counter()-stage_started)*1000)
+            stage_started=time.perf_counter()
+            items=resolve_recognized_items(recognized,catalog)
+            timings['matching']=round((time.perf_counter()-stage_started)*1000)
         else:
             items=await recognize_image(Path(r['path']),r['mime'])
             catalog=await catalog_rows()
@@ -186,8 +196,8 @@ async def recognize(body:dict,user:str=Depends(current_user)):
                     item['food_code']=match_food(item['name'],catalog)
         elapsed_ms=round((time.perf_counter()-started)*1000)
         source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
-        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items))
-        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,
+        log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),timings)
+        return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,
                 'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
     finally:
         AI_SEM.release()

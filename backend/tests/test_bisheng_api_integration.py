@@ -116,7 +116,7 @@ def test_workflow_refills_live_database_food_and_saved_meal_nutrition(recognitio
     image_id = api.upload()
     calls = []
 
-    async def workflow(path, mime):
+    async def workflow(path, mime, timings=None):
         calls.append((path, mime))
         assert path.parent == api.settings.app_media_dir
         assert path.is_file() and path.suffix == '.jpg'
@@ -128,6 +128,8 @@ def test_workflow_refills_live_database_food_and_saved_meal_nutrition(recognitio
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['source'] == 'bisheng'
+    assert set(body['timings_ms']) == {'admission', 'workflow', 'catalog', 'matching'}
+    assert all(isinstance(value, int) and value >= 0 for value in body['timings_ms'].values())
     assert len(calls) == 1 and calls[0][1] == 'image/jpeg'
     item = body['items'][0]
     assert item['food_code'] == api.food['code']

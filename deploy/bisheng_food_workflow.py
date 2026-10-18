@@ -322,7 +322,7 @@ def _literal(key, value):
 
 def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
                    *, snapshot_id: str, max_items: int = 8, score_threshold: float = 0.1,
-                   name: str = "食光餐食识别与食品热量检索") -> dict:
+                   name: str = "食光餐食识别与食品热量检索", image_only_input: bool = False) -> dict:
     """Return the POST /api/v1/workflow/create body, initially offline.
 
     Import document batches from backend.app.knowledge_export into a type=0
@@ -335,6 +335,8 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
             raise ValueError(f"{label} must be a positive integer")
     if isinstance(max_items, bool) or not isinstance(max_items, int) or not 1 <= max_items <= 8:
         raise ValueError("max_items must be between 1 and 8")
+    if type(image_only_input) is not bool:
+        raise ValueError("image_only_input must be boolean")
     if not isinstance(snapshot_id, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot_id):
         raise ValueError("snapshot_id must be the catalog's 64 character SHA256")
     if isinstance(score_threshold, bool) or not isinstance(score_threshold, (float, int)) or not math.isfinite(score_threshold) or not 0.01 <= score_threshold <= 0.99:
@@ -349,15 +351,18 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
     image_field = {"key": "meal_image", "value": "上传一张餐食照片", "type": "file", "required": True,
                    "multiple": False, "file_type": "image", "file_content": "meal_image_content",
                    "file_path": "meal_image_path", "image_file": "meal_image_files", "file_content_size": 0}
+    if image_only_input:
+        image_field['skip_image_text_extraction'] = True
     input_node = _node("input_meal", "input", "上传餐食图片", [
         _param("form_input", [image_field], "form", tab="form_input", **{"global": "item:form_input"}),
     ], 400, 0, version=2, tab="form_input")
     visual_system = ("你是餐食图像识别器。仅根据图片识别实际可见的食物，最多" + str(max_items) +
-                     "项；复合菜作为一项，不再重复列配料。不要猜测不可见食物，不要输出热量或食品编码。"
-                     "只输出JSON：{\"items\":[{\"name\":\"菜名\",\"estimated_grams\":150,\"preparation\":\"蒸熟\"}]}。"
+                     "项。按餐盘分格检查，再检查餐盘外食品；复合菜只列一项，不再重复列配料。"
+                     "使用图中可确认的常用食物名；无法确认肉类品种、具体配方时用概括名，不猜测。不要输出热量或食品编码。"
+                     "只输出单行紧凑JSON，不加Markdown、缩进或解释：{\"items\":[{\"name\":\"菜名\",\"estimated_grams\":150,\"preparation\":\"蒸熟\"}]}。"
                      "preparation仅可为生鲜、煮熟、蒸熟、炒熟、煎熟、烤熟、炸熟、炖熟、干制、即食、饮用、烘焙、熟制或空字符串。"
                      "能确认已熟但具体做法不明用熟制，不能确认生熟则为空；不要创造炒制、炖煮等类别。"
-                     "图片无食物输出items空数组。重量为每项可食部分5至3000克的估算。")
+                     "图片无食物输出items空数组。重量为每项可食部分5至3000克的估算；包装净含量清晰可见时优先按标注，不凭容器大小猜。")
     vision = _node("llm_vision", "llm", "识别菜名与估算重量", [
         _param("model_id", vision_model_id, "bisheng_model"), _param("temperature", 0.1, "slide"),
         _param("system_prompt", visual_system, "var_textarea"),
@@ -422,12 +427,14 @@ def main(argv=None):
     parser.add_argument("--max-items", type=int, default=8)
     parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--name", default="食光餐食识别与食品热量检索")
+    parser.add_argument("--image-only-input", action="store_true",
+                        help="Opt in only after installing and testing the BiSheng image-input patch")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
     args = parser.parse_args(argv)
     body = build_workflow(args.knowledge_id, args.vision_model_id, args.text_model_id,
                           snapshot_id=args.snapshot_id, max_items=args.max_items,
-                          score_threshold=args.score_threshold, name=args.name)
+                          score_threshold=args.score_threshold, name=args.name, image_only_input=args.image_only_input)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
         json.dump(body, output, ensure_ascii=False, indent=2)

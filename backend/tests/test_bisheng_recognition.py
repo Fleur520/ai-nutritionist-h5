@@ -130,6 +130,15 @@ def test_upload_nested_user_input_and_same_session_roundtrip(configured, monkeyp
     assert 'api_key' not in items[0]
 
 
+def test_phase_timings_include_transport_and_validation_without_private_data(configured, monkeypatch):
+    _, photo = configured
+    install_transport(monkeypatch)
+    timings = {}
+    items = asyncio.run(adapter.recognize_workflow_image(photo, 'image/jpeg', timings))
+    assert items and set(timings) == {'upload', 'invoke_0', 'invoke_1', 'validation'}
+    assert all(type(value) is int and value >= 0 for value in timings.values())
+
+
 def test_document_provenance_survives_adapter_without_document_body(configured, monkeypatch):
     _, photo = configured
     payload = result_payload()

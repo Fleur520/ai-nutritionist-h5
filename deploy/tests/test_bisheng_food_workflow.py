@@ -144,6 +144,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
         form = get("input_meal")["form_input"][0]
         self.assertEqual((form["key"], form["type"], form["image_file"]),
                          ("meal_image", "file", "meal_image_files"))
+        self.assertNotIn('skip_image_text_extraction',form)
         self.assertEqual(get("llm_vision")["image_prompt"], ["input_meal.meal_image_files"])
         retrieve_inputs = {row["key"]: row["value"] for row in get("code_retrieve")["code_input"]}
         self.assertEqual(retrieve_inputs, {"items": "code_foods.items", "knowledge_id": 7,
@@ -164,7 +165,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
 
     def test_generator_rejects_invalid_platform_ids_snapshot_and_limits(self):
         for kwargs in ({"knowledge_id": 0}, {"vision_model_id": True}, {"text_model_id": -1},
-                       {"snapshot_id": ""}, {"max_items": 9}, {"score_threshold": float("nan")}):
+                       {"snapshot_id": ""}, {"max_items": 9}, {"score_threshold": float("nan")}, {"image_only_input": 1}):
             args = {"knowledge_id": 1, "vision_model_id": 2, "text_model_id": 3, "snapshot_id": SNAPSHOT}
             args.update(kwargs)
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
