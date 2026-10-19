@@ -491,6 +491,10 @@ def main(argv=None):
                         help="Opt in to one OpenAI embedding batch and one authorized Milvus batch per meal")
     parser.add_argument("--compact-model-invocation", action="store_true",
                         help="Opt in to configured ChatOpenAI calls that avoid logging image Base64")
+    parser.add_argument("--compact-vision-output", action="store_true",
+                        help="Opt in to shorter name/grams/preparation tuples with unchanged validation")
+    parser.add_argument("--defer-code-compilation", action="store_true",
+                        help="Compile large authored code at node execution rather than graph initialization")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
     args = parser.parse_args(argv)
@@ -504,6 +508,12 @@ def main(argv=None):
     if args.compact_model_invocation:
         from bisheng_compact_vision import enable_compact_vision
         body = enable_compact_vision(body)
+    if args.compact_vision_output:
+        from bisheng_code_runtime import enable_compact_vision_output
+        body = enable_compact_vision_output(body)
+    if args.defer_code_compilation:
+        from bisheng_code_runtime import defer_code_compilation
+        body = defer_code_compilation(body)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
         json.dump(body, output, ensure_ascii=False, indent=2)
