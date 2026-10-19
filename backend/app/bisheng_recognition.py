@@ -136,7 +136,7 @@ def _evidence(value):
     return result
 
 
-def _structured_items(message):
+def _structured_items(message, timings=None):
     if isinstance(message, str):
         text = message.strip()
         if text.startswith('```'):
@@ -180,6 +180,12 @@ def _structured_items(message):
                 raise ValueError('invalid retrieved codes')
             cleaned['retrieved_codes'] = list(dict.fromkeys(_code(code) for code in codes))
         result.append(cleaned)
+    diagnostics = value.get('timings_ms')
+    if timings is not None and isinstance(diagnostics, dict):
+        for key in ('input_and_resume', 'image', 'vision', 'retrieval', 'evidence', 'matching', 'pipeline_total'):
+            duration = diagnostics.get(key)
+            if type(duration) in {int, float} and math.isfinite(duration) and 0 <= duration <= 3600000:
+                timings['node_' + key] = round(duration)
     return result
 
 
@@ -194,6 +200,14 @@ def _image_input(event, image_key, uploaded_path):
     image_fields = [field for field in fields if field.get('key') == image_key and field.get('type') == 'file']
     if len(image_fields) != 1 or any(field.get('required') and field.get('key') != image_key for field in fields):
         raise ValueError('configured image field is not the workflow input')
+    reference_key = image_key + '_ref'
+    reference_fields = [field for field in fields if field.get('key') == reference_key]
+    # Explicitly advertised dual input only. Legacy workflows keep their file
+    # path and do not silently skip required file processing.
+    if reference_fields and not image_fields[0].get('required'):
+        if len(reference_fields) != 1 or reference_fields[0].get('type') != 'text' or reference_fields[0].get('required'):
+            raise ValueError('invalid image reference capability')
+        return {node_id: {image_key: [], reference_key: uploaded_path}}
     return {node_id: {image_key: [uploaded_path]}}
 
 
@@ -288,7 +302,7 @@ async def recognize_workflow_image(path: Path, mime: str, timings: dict | None =
                     if not closed or not submitted_image or len(messages) != 1:
                         raise ValueError('workflow did not finish with one image result')
                     phase_started=time.perf_counter()
-                    items=_structured_items(messages[0])
+                    items=_structured_items(messages[0], timings)
                     if timings is not None:
                         timings['validation']=round((time.perf_counter()-phase_started)*1000)
                     return items

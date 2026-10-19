@@ -139,6 +139,30 @@ def test_phase_timings_include_transport_and_validation_without_private_data(con
     assert all(type(value) is int and value >= 0 for value in timings.values())
 
 
+def test_reference_capability_skips_file_parsing_only_when_explicitly_advertised(configured, monkeypatch):
+    _, photo = configured
+    event = input_event()
+    event['input_schema']['value'] = [
+        {'key': 'meal_image', 'type': 'file', 'required': False},
+        {'key': 'meal_image_ref', 'type': 'text', 'required': False},
+    ]
+    _, invocations = install_transport(monkeypatch, rounds=[response([event]), response(output_events())])
+    run(photo)
+    assert invocations[1]['json']['user_input'] == {'input_meal': {'meal_image': [], 'meal_image_ref': UPLOADED}}
+
+
+def test_node_timings_are_bounded_allowlisted_and_do_not_enter_food_results(configured, monkeypatch):
+    _, photo = configured
+    payload = result_payload(timings_ms={'image': 12, 'vision': 1234.5, 'matching': True,
+                                       'retrieval': -1, 'pipeline_total': 3600001,
+                                       'private_path': '/private/photo.jpg'})
+    install_transport(monkeypatch, rounds=[response([input_event()]), response(output_events(payload))])
+    timings = {}
+    items = asyncio.run(adapter.recognize_workflow_image(photo, 'image/jpeg', timings))
+    assert {key: value for key, value in timings.items() if key.startswith('node_')} == {'node_image': 12, 'node_vision': 1234}
+    assert 'timings_ms' not in items[0]
+
+
 def test_document_provenance_survives_adapter_without_document_body(configured, monkeypatch):
     _, photo = configured
     payload = result_payload()

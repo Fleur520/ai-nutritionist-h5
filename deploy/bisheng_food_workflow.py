@@ -429,12 +429,18 @@ def main(argv=None):
     parser.add_argument("--name", default="食光餐食识别与食品热量检索")
     parser.add_argument("--image-only-input", action="store_true",
                         help="Opt in only after installing and testing the BiSheng image-input patch")
+    parser.add_argument("--image-reference-origin",
+                        help="Opt in to bounded image reference input from this exact platform storage origin")
+    parser.add_argument("--image-reference-prefix", default="/tmp-dir/")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
     args = parser.parse_args(argv)
     body = build_workflow(args.knowledge_id, args.vision_model_id, args.text_model_id,
                           snapshot_id=args.snapshot_id, max_items=args.max_items,
                           score_threshold=args.score_threshold, name=args.name, image_only_input=args.image_only_input)
+    if args.image_reference_origin:
+        from bisheng_food_fastpath import enable_image_reference
+        body = enable_image_reference(body, args.image_reference_origin, args.image_reference_prefix)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
         json.dump(body, output, ensure_ascii=False, indent=2)
