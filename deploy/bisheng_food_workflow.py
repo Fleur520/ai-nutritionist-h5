@@ -489,6 +489,8 @@ def main(argv=None):
     parser.add_argument("--image-reference-prefix", default="/tmp-dir/")
     parser.add_argument("--batch-document-search", action="store_true",
                         help="Opt in to one OpenAI embedding batch and one authorized Milvus batch per meal")
+    parser.add_argument("--compact-model-invocation", action="store_true",
+                        help="Opt in to configured ChatOpenAI calls that avoid logging image Base64")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
     args = parser.parse_args(argv)
@@ -499,6 +501,9 @@ def main(argv=None):
     if args.image_reference_origin:
         from bisheng_food_fastpath import enable_image_reference
         body = enable_image_reference(body, args.image_reference_origin, args.image_reference_prefix)
+    if args.compact_model_invocation:
+        from bisheng_compact_vision import enable_compact_vision
+        body = enable_compact_vision(body)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
         json.dump(body, output, ensure_ascii=False, indent=2)
