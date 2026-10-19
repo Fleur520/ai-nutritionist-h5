@@ -291,7 +291,7 @@ class WorkflowGeneratorTests(unittest.TestCase):
     def test_empty_items_do_not_initialize_store_or_embed_fake_queries(self):
         calls = []
         retrieve = native_retriever(None, calls)
-        self.assertEqual(retrieve([], 7, 0.3, 8), {"documents": []})
+        self.assertEqual(retrieve([], 7, 0.3, 8), {"documents": [], "retrieval_details": "{}"})
         self.assertEqual(calls, [])
 
     def test_native_empty_query_fails_without_searching(self):
