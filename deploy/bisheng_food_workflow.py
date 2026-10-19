@@ -50,20 +50,25 @@ def main(vision, max_items):
 RETRIEVE_DOCUMENT_CODE = '''import json
 import math
 import hashlib
+import time
+from types import SimpleNamespace
 from bisheng.database.models.knowledge import KnowledgeDao
 from concurrent.futures import ThreadPoolExecutor
 from bisheng.interface.initialize.loading import instantiate_vectorstore
 from bisheng.interface.vector_store.custom import MilvusWithPermissionCheck
 
-def main(items, knowledge_id, score_threshold, top_k):
+def main(items, knowledge_id, score_threshold, top_k, batch_search=False):
+    started = time.monotonic()
     if not isinstance(items, list) or len(items) > 8:
         raise ValueError("逐菜检索输入数量无效")
     if type(knowledge_id) is not int or knowledge_id <= 0 or type(top_k) is not int or not 1 <= top_k <= 8:
         raise ValueError("知识库或候选数量配置无效")
     if isinstance(score_threshold, bool) or not isinstance(score_threshold, (int, float)) or not math.isfinite(score_threshold) or not 0.01 <= score_threshold <= 0.99:
         raise ValueError("知识库候选阈值无效")
+    if type(batch_search) is not bool:
+        raise ValueError("批量检索配置无效")
     if not items:
-        return {"documents": []}
+        return {"documents": [], "retrieval_details": "{}"}
     knowledge = KnowledgeDao.query_by_id(knowledge_id)
     if knowledge is None or knowledge.type != 0:
         raise ValueError("必须配置食品文档知识库，不能使用QA知识库")
@@ -80,15 +85,61 @@ def main(items, knowledge_id, score_threshold, top_k):
             raise ValueError("逐菜检索制作状态无效")
         query = item["name"].strip() + ("，" + preparation.strip() if preparation.strip() else "")
         queries.append(query)
-    # The v1.3.1 string-search wrapper embeds each query twice. Its vector
-    # entrypoint already embeds with the selected collection model and applies
-    # the same permission/partition filters. Avoid that duplicate call, bound
-    # concurrency, and keep map order aligned with the visual food list.
-    def search(query):
-        return store.similarity_search_with_score_by_vector([], query=query, k=top_k, timeout=20)
     unique = list(dict.fromkeys(queries))
-    with ThreadPoolExecutor(max_workers=min(4, len(unique))) as executor:
-        results = dict(zip(unique, executor.map(search, unique)))
+    details = {}
+    if batch_search:
+        # Reuse the native authorized store, embedding model, fields and tenant
+        # partition. One embedding batch and one Milvus RPC replace up to eight
+        # individual requests. OpenAIEmbeddings.embed_query delegates to
+        # embed_documents([text]); other embedding types must use legacy mode.
+        if len(store.col) != 1 or len(store.collection_embeddings) != 1 or len(store.col_partition_key) != 1:
+            raise ValueError("批量检索需要单一授权食品文档库")
+        embedding = store.collection_embeddings[0]
+        if type(embedding.embeddings).__name__ != "OpenAIEmbeddings":
+            raise ValueError("批量路径要求OpenAI兼容向量模型")
+        partition = store.col_partition_key[0]
+        if partition is not None and str(partition) != str(knowledge_id):
+            raise ValueError("食品文档库分区不一致")
+        details["retrieval_setup"] = round((time.monotonic() - started) * 1000)
+        phase = time.monotonic()
+        vectors = embedding.embed_documents(unique)
+        if not isinstance(vectors, list) or len(vectors) != len(unique) or not vectors or not vectors[0]:
+            raise ValueError("批量向量数量无效")
+        normalized = []
+        for vector in vectors:
+            if not isinstance(vector, (list, tuple)) or len(vector) != len(vectors[0]) or any(
+                isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in vector
+            ):
+                raise ValueError("批量向量格式无效")
+            norm = math.sqrt(math.fsum(x * x for x in vector))
+            if not math.isfinite(norm) or norm <= 0:
+                raise ValueError("批量向量范数无效")
+            normalized.append([float(x) / norm for x in vector])
+        details["retrieval_embedding"] = round((time.monotonic() - phase) * 1000)
+        output_fields = [field for field in store.fields if field != store._vector_field]
+        expression = f'{store._partition_field}=="{partition}"' if partition is not None else None
+        phase = time.monotonic()
+        hits = store.col[0].search(data=normalized, anns_field=store._vector_field,
+                                  param=store.search_params, limit=top_k, expr=expression,
+                                  output_fields=output_fields, timeout=8)
+        details["retrieval_milvus"] = round((time.monotonic() - phase) * 1000)
+        if len(hits) != len(unique):
+            raise ValueError("批量检索返回数量无效")
+        results = {}
+        for query, found in zip(unique, hits):
+            pairs = []
+            for hit in found:
+                metadata = {field: hit.entity.get(field) for field in output_fields}
+                doc = SimpleNamespace(page_content=metadata.pop(store._text_field), metadata=metadata)
+                pairs.append((doc, hit.score))
+            results[query] = sorted(pairs, key=lambda row: row[1])[:top_k]
+    else:
+        # The legacy string wrapper embeds twice; its vector entrypoint embeds
+        # once with the collection model and applies permission/partition filters.
+        def search(query):
+            return store.similarity_search_with_score_by_vector([], query=query, k=top_k, timeout=20)
+        with ThreadPoolExecutor(max_workers=min(4, len(unique))) as executor:
+            results = dict(zip(unique, executor.map(search, unique)))
     documents = []
     for query in queries:
         rows = []
@@ -120,7 +171,7 @@ def main(items, knowledge_id, score_threshold, top_k):
                          "content_sha256": extra["content_sha256"]})
         rows.sort(key=lambda row: row["score"], reverse=True)
         documents.append(rows[:top_k])
-    return {"documents": documents}
+    return {"documents": documents, "retrieval_details": json.dumps(details)}
 '''
 
 
@@ -322,7 +373,8 @@ def _literal(key, value):
 
 def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
                    *, snapshot_id: str, max_items: int = 8, score_threshold: float = 0.1,
-                   name: str = "食光餐食识别与食品热量检索", image_only_input: bool = False) -> dict:
+                   name: str = "食光餐食识别与食品热量检索", image_only_input: bool = False,
+                   batch_document_search: bool = False) -> dict:
     """Return the POST /api/v1/workflow/create body, initially offline.
 
     Import document batches from backend.app.knowledge_export into a type=0
@@ -337,6 +389,8 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
         raise ValueError("max_items must be between 1 and 8")
     if type(image_only_input) is not bool:
         raise ValueError("image_only_input must be boolean")
+    if type(batch_document_search) is not bool:
+        raise ValueError("batch_document_search must be boolean")
     if not isinstance(snapshot_id, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot_id):
         raise ValueError("snapshot_id must be the catalog's 64 character SHA256")
     if isinstance(score_threshold, bool) or not isinstance(score_threshold, (float, int)) or not math.isfinite(score_threshold) or not 0.01 <= score_threshold <= 0.99:
@@ -377,8 +431,9 @@ def build_workflow(knowledge_id: int, vision_model_id: int, text_model_id: int,
     nodes = [start, input_node, vision, parse]
     nodes.append(_code_node("code_retrieve", "检索食品文档库（前8候选）", RETRIEVE_DOCUMENT_CODE,
                            [_ref("items", "code_foods.items"), _literal("knowledge_id", knowledge_id),
-                            _literal("score_threshold", score_threshold), _literal("top_k", 8)],
-                           [("documents", "list")], 1600, 0))
+                            _literal("score_threshold", score_threshold), _literal("top_k", 8)]
+                           + ([_literal("batch_search", True)] if batch_document_search else []),
+                           [("documents", "list")] + ([("retrieval_details", "str")] if batch_document_search else []), 1600, 0))
     nodes[-1]["data"]["description"] = f"文档知识库 ID：{knowledge_id}；每道菜按名称和做法向量检索；阈值 {score_threshold}；最多8条；校验食品编码、原文和快照。"
     nodes.append(_code_node("code_evidence", "校验目录并保留检索证据", COLLECT_EVIDENCE_CODE,
                            [_ref("items", "code_foods.items"), _ref("documents", "code_retrieve.documents"),
@@ -432,12 +487,15 @@ def main(argv=None):
     parser.add_argument("--image-reference-origin",
                         help="Opt in to bounded image reference input from this exact platform storage origin")
     parser.add_argument("--image-reference-prefix", default="/tmp-dir/")
+    parser.add_argument("--batch-document-search", action="store_true",
+                        help="Opt in to one OpenAI embedding batch and one authorized Milvus batch per meal")
     parser.add_argument("--output", type=Path, required=True,
                         help="Explicit local JSON path; keep generated platform IDs outside Git")
     args = parser.parse_args(argv)
     body = build_workflow(args.knowledge_id, args.vision_model_id, args.text_model_id,
                           snapshot_id=args.snapshot_id, max_items=args.max_items,
-                          score_threshold=args.score_threshold, name=args.name, image_only_input=args.image_only_input)
+                          score_threshold=args.score_threshold, name=args.name, image_only_input=args.image_only_input,
+                          batch_document_search=args.batch_document_search)
     if args.image_reference_origin:
         from bisheng_food_fastpath import enable_image_reference
         body = enable_image_reference(body, args.image_reference_origin, args.image_reference_prefix)

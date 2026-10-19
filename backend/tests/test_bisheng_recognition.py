@@ -155,11 +155,14 @@ def test_node_timings_are_bounded_allowlisted_and_do_not_enter_food_results(conf
     _, photo = configured
     payload = result_payload(timings_ms={'image': 12, 'vision': 1234.5, 'matching': True,
                                        'retrieval': -1, 'pipeline_total': 3600001,
+                                       'retrieval_setup': 80, 'retrieval_embedding': 10 ** 500,
+                                       'retrieval_milvus': 20,
                                        'private_path': '/private/photo.jpg'})
     install_transport(monkeypatch, rounds=[response([input_event()]), response(output_events(payload))])
     timings = {}
     items = asyncio.run(adapter.recognize_workflow_image(photo, 'image/jpeg', timings))
-    assert {key: value for key, value in timings.items() if key.startswith('node_')} == {'node_image': 12, 'node_vision': 1234}
+    assert {key: value for key, value in timings.items() if key.startswith('node_')} == {
+        'node_image': 12, 'node_vision': 1234, 'node_retrieval_setup': 80, 'node_retrieval_milvus': 20}
     assert 'timings_ms' not in items[0]
 
 

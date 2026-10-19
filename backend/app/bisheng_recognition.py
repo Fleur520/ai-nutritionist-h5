@@ -182,9 +182,10 @@ def _structured_items(message, timings=None):
         result.append(cleaned)
     diagnostics = value.get('timings_ms')
     if timings is not None and isinstance(diagnostics, dict):
-        for key in ('input_and_resume', 'image', 'vision', 'retrieval', 'evidence', 'matching', 'pipeline_total'):
+        for key in ('input_and_resume', 'image', 'vision', 'retrieval', 'evidence', 'matching', 'pipeline_total',
+                    'retrieval_setup', 'retrieval_embedding', 'retrieval_milvus'):
             duration = diagnostics.get(key)
-            if type(duration) in {int, float} and math.isfinite(duration) and 0 <= duration <= 3600000:
+            if type(duration) in {int, float} and 0 <= duration <= 3600000 and math.isfinite(duration):
                 timings['node_' + key] = round(duration)
     return result
 

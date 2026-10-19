@@ -117,12 +117,17 @@ def enable_image_reference(body, origin, path_prefix="/tmp-dir/"):
     args = [_ref("stamp", "clock_start.stamp"), _ref("input_ms", "prepare_image.input_ms"),
             _ref("image_ms", "prepare_image.image_ms"), _ref("vision_ms", "code_foods.vision_ms"),
             _ref("retrieval_ms", "code_retrieve.retrieval_ms"), _ref("evidence_ms", "code_evidence.evidence_ms")]
+    batch_details = any(field["key"] == "retrieval_details"
+                        for field in params("code_retrieve")["code_output"]["value"])
+    if batch_details:
+        args.append(_ref("retrieval_details", "code_retrieve.retrieval_details"))
     timed("code_result", args, [], '''value = json.loads(result["result"])
 value["timings_ms"] = {"input_and_resume": input_ms, "image": image_ms, "vision": vision_ms,
                       "retrieval": retrieval_ms, "evidence": evidence_ms,
                       "matching": int(time.monotonic() * 1000) - started,
                       "pipeline_total": int(time.monotonic() * 1000) - stamp}
-result["result"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))''')
+''' + ('value["timings_ms"].update(json.loads(retrieval_details))\n' if batch_details else '')
+          + 'result["result"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))')
 
     graph["edges"] = [edge for edge in graph["edges"] if (edge["source"], edge["target"]) not in {
         ("start_food", "input_meal"), ("input_meal", "llm_vision")}]
