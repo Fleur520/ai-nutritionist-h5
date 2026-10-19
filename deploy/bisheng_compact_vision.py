@@ -1,9 +1,10 @@
-"""Opt-in workflow invocation that keeps photo bytes out of DEBUG node logs.
+"""Opt-in workflow invocation and compact DEBUG representations of evidence.
 
 Only configured ChatOpenAI models are supported. The platform's model loader,
 online checks, quota check and status updates remain in use; global platform
 logging and model configuration are not modified.
 """
+import textwrap
 
 
 COMPACT_VISION_CODE = '''def main(files, model_id, system_prompt, user_prompt):
@@ -103,6 +104,32 @@ def enable_compact_vision(body):
     node["data"]["description"] = (f"使用平台模型{values['model_id']}配置、上线检查、调用次数配额及状态更新；"
                                       "仅本流程以非流式HTTP提交图片，图片Base64不进入节点输入输出及SDK调试日志。平台日志与模型配置不变。")
     nodes[nodes.index(original)] = node
+    # BiSheng's synchronous DEBUG callback formats NodeEndData using repr().
+    # Keep full evidence in variables/JSON/editor logs, while avoiding repeated
+    # Rich rendering of large document records on the console. These ordinary
+    # str/list subclasses do not change contents, hashes or JSON serialization.
+    for row in nodes:
+        if row["id"] not in {"code_retrieve", "code_evidence", "code_result"}:
+            continue
+        params = {p["key"]: p for group in row["data"]["group_params"] for p in group["params"]}
+        arguments = ", ".join(field["key"] for field in params["code_input"]["value"])
+        source = params["code"]["value"].replace("def main(", "def original_main(", 1)
+        params["code"]["value"] = ("def main(" + arguments + "):\n"
+            "    class EvidenceText(str):\n"
+            "        def __repr__(self):\n"
+            "            return '<food evidence text: %d chars>' % len(self)\n"
+            "    class EvidenceList(list):\n"
+            "        def __repr__(self):\n"
+            "            return '<food evidence groups: %d>' % len(self)\n"
+            + textwrap.indent(source, "    ")
+            + "\n    result = original_main(" + arguments + ")\n"
+            "    for key in ('documents', 'evidence_json', 'matching_json', 'result'):\n"
+            "        value = result.get(key)\n"
+            "        if isinstance(value, str):\n"
+            "            result[key] = EvidenceText(value)\n"
+            "        elif isinstance(value, list):\n"
+            "            result[key] = EvidenceList(value)\n"
+            "    return result\n")
     names = {row["id"]: row["data"]["name"] for row in nodes}
     for row in nodes:
         for group in row["data"]["group_params"]:

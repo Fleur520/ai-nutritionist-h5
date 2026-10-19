@@ -12,8 +12,9 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bisheng_compact_vision import COMPACT_VISION_CODE, enable_compact_vision
+from bisheng_food_fastpath import enable_image_reference
 from bisheng_food_workflow import build_workflow
-from test_bisheng_food_workflow import code_main
+from test_bisheng_food_workflow import answer, code_main, matches
 
 
 class CompactVisionTests(unittest.TestCase):
@@ -144,3 +145,34 @@ class CompactVisionTests(unittest.TestCase):
         self.assertEqual(inputs['files'], 'input_meal.meal_image_files')
         self.assertNotIn('private-test-key', json.dumps(params['code_input']))
         self.assertEqual(params['code_output'], [{'key': 'output', 'type': 'str'}])
+
+    def test_full_evidence_json_survives_while_debug_representation_is_small(self):
+        body = enable_compact_vision(enable_image_reference(
+            build_workflow(7, 44, 12, snapshot_id='a' * 64, batch_document_search=True), 'http://storage:9000'))
+        nodes = {n['id']: n for n in body['data']['nodes']}
+        get = lambda key: {p['key']: p['value'] for g in nodes[key]['data']['group_params'] for p in g['params']}
+        collect = code_main(get('code_evidence')['code'])
+        value = collect([{'name': '白米饭', 'estimated_grams': 100}], [matches(answer())], 7, 'a' * 64)
+        text = value['evidence_json']
+        self.assertLess(len(repr(text)), 100)
+        self.assertNotIn('rice', repr(text))
+        self.assertEqual(json.loads(text)['items'][0]['candidates'][0]['food_code'], 'rice')
+        self.assertEqual(json.loads(json.dumps(text)), str(text))
+        finish = code_main(get('code_result')['code'])
+        final = finish(text, 0, 1, 2, 3, 4, 5, '{}')['result']
+        self.assertLess(len(repr(final)), 100)
+        self.assertEqual(json.loads(final)['items'][0]['food_code'], 'rice')
+
+    def test_summary_representations_survive_native_style_pydantic_event_formatting(self):
+        from typing import Any
+        from pydantic import BaseModel
+        body = enable_compact_vision(enable_image_reference(
+            build_workflow(7, 44, 12, snapshot_id='a' * 64), 'http://storage:9000'))
+        node = next(n for n in body['data']['nodes'] if n['id'] == 'code_evidence')
+        params = {p['key']: p['value'] for g in node['data']['group_params'] for p in g['params']}
+        text = code_main(params['code'])([{'name': '白米饭', 'estimated_grams': 100}], [matches(answer())], 7, 'a' * 64)['evidence_json']
+        class Event(BaseModel):
+            data: Any
+        event = Event(data={'value': text})
+        self.assertNotIn('raw_record', str(event))
+        self.assertIn('raw_record', event.model_dump_json())
