@@ -60,6 +60,8 @@ def recognition_api(tmp_path, monkeypatch):
     async def cleanup():
         async with database.connect() as db:
             for user in users:
+                await db.execute('DELETE FROM meal_item_estimates WHERE meal_item_id IN (SELECT i.id FROM meal_items i JOIN meals m ON m.id=i.meal_id WHERE m.user_id=?)', (user,))
+                await db.execute('DELETE FROM meal_recognitions WHERE user_id=?', (user,))
                 await db.execute('DELETE FROM meal_items WHERE meal_id IN (SELECT id FROM meals WHERE user_id=?)', (user,))
                 for table in ('meals', 'images', 'sessions', 'profiles'):
                     await db.execute(f'DELETE FROM {table} WHERE user_id=?', (user,))
@@ -147,7 +149,7 @@ def test_workflow_refills_live_database_food_and_saved_meal_nutrition(recognitio
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['source'] == 'bisheng'
-    assert set(body['timings_ms']) == {'admission', 'workflow', 'catalog', 'matching'}
+    assert set(body['timings_ms']) == {'admission', 'workflow', 'catalog', 'matching', 'receipt'}
     assert all(isinstance(value, int) and value >= 0 for value in body['timings_ms'].values())
     assert len(calls) == 1 and calls[0][1] == 'image/jpeg'
     item = body['items'][0]

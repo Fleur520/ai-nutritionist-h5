@@ -71,7 +71,7 @@ const nutrition = (value: number | undefined) => Number((value || 0).toFixed(1))
     <template v-else>
       <article v-for="meal in meals" :key="meal.id" class="meal-card">
         <div class="meal-head"><div><span class="meal-dot"></span><strong>{{ label[meal.meal_type] || meal.meal_type }}</strong><small>{{ mealTime(meal.eaten_at) }}</small></div><strong>{{ Math.round(total(meal)) }} <small>kcal</small></strong></div>
-        <div v-for="item in meal.items" :key="item.id" class="meal-line"><span>{{ item.name }}<small>{{ item.grams }} 克</small></span><span>{{ nutrition(item.kcal) }} kcal</span></div>
+        <div v-for="item in meal.items" :key="item.id" class="meal-line"><span>{{ item.name }}<small>{{ item.grams }} 克<span v-if="item.source_type === 'ai_estimate'"> · 照片 AI 估算 · 未核验</span></small></span><span>{{ nutrition(item.kcal) }} kcal</span></div>
         <img v-if="meal.image_id" :src="'/api/images/' + meal.image_id" class="meal-photo" alt="本餐照片" loading="lazy" />
       </article>
     </template>

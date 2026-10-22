@@ -26,6 +26,8 @@ from .config import get_settings
 from .db import INTEGRITY_ERRORS, connect, initialize
 from .food_catalog import catalog_rows, initialize_catalog, match_food
 from .schemas import ChatMessage, Credentials, MealCreate, ProfilePatch
+from .meal_estimates import (NUTRIENTS, initialize_estimates, save_recognition,
+                             recognition_for_meal, model_item)
 
 log=logging.getLogger('nutrition')
 settings=get_settings()
@@ -38,6 +40,7 @@ Image.MAX_IMAGE_PIXELS=16_000_000
 async def lifespan(app: FastAPI):
     await initialize()
     await initialize_catalog()
+    await initialize_estimates()
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
     try:
         yield
@@ -244,23 +247,38 @@ async def recognize(body:dict,user:str=Depends(current_user)):
             if item.get('food_code') not in valid_codes:
                 item['food_code']=match_food(item['name'],catalog)
     timings['matching']=round((time.perf_counter()-stage_started)*1000)
-    elapsed_ms=round((time.perf_counter()-started)*1000)
     source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
+    stage_started=time.perf_counter()
+    receipt=await save_recognition(user,image_id,items,{
+        'provider':source, 'workflow_id':settings.bisheng_recognition_workflow_id if use_workflow else None,
+        'app_revision':settings.app_revision, 'generated_at':datetime.now(timezone.utc).isoformat()})
+    timings['receipt']=round((time.perf_counter()-stage_started)*1000)
+    elapsed_ms=round((time.perf_counter()-started)*1000)
     log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d coalesced=%s timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),coalesced,timings)
-    return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,'coalesced':coalesced,
-            'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
+    return {'items':items,'recognition_id':receipt,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,'coalesced':coalesced,
+            'notice':'优先使用照片模型的重量与营养估算，食品库匹配仅供参考；未匹配也可保存。AI 估算未经实验核验，请确认分量与做法。'}
 
 @app.post('/api/meals',status_code=201)
 async def add_meal(body:MealCreate,user:str=Depends(current_user)):
     meal_id=str(uuid.uuid4())
-    codes=[x.food_code for x in body.items]
+    codes={x.food_code for x in body.items if x.food_code}
     async with connect() as db:
         if body.image_id:
             row=await (await db.execute('SELECT 1 FROM images WHERE id=? AND user_id=?',(body.image_id,user))).fetchone()
             if not row: raise HTTPException(404,'图片不存在')
-        rows=await (await db.execute('SELECT * FROM foods WHERE code IN ('+','.join('?' for _ in set(codes))+')',tuple(set(codes)))).fetchall()
+        rows=await (await db.execute('SELECT * FROM foods WHERE code IN ('+','.join('?' for _ in codes)+')',tuple(codes))).fetchall() if codes else []
         by_code={r['code']:r for r in rows}
         if any(code not in by_code for code in codes): raise HTTPException(422,'请选择标准食物')
+        receipt=await recognition_for_meal(db,body,user)
+        prepared=[]
+        for item in body.items:
+            if item.nutrition_source == 'model':
+                original,estimate=model_item(item,receipt)
+                prepared.append((item,estimate,original))
+            else:
+                if not item.food_code or item.food_code not in by_code:
+                    raise HTTPException(422,'请选择食品库食物，或使用照片模型估算')
+                prepared.append((item,by_code[item.food_code],None))
         # Normalize time to UTC; reporting uses UTC dates in this MVP.
         eaten=body.eaten_at
         if eaten.tzinfo is None: raise HTTPException(422,'eaten_at 必须包含时区')
@@ -268,11 +286,18 @@ async def add_meal(body:MealCreate,user:str=Depends(current_user)):
         try:
             await db.execute('INSERT INTO meals(id,user_id,meal_type,eaten_at,image_id) VALUES(?,?,?,?,?)',
                              (meal_id,user,body.meal_type,eaten,body.image_id))
-            for item in body.items:
-                food=by_code[item.food_code]
-                vals=[round(food[k]*item.grams/100,2) for k in ('kcal','protein','fat','carbs')]
+            for item,food,original in prepared:
+                item_id=str(uuid.uuid4())
+                vals=[round(food[k]*item.grams/100,2) for k in NUTRIENTS]
                 await db.execute('INSERT INTO meal_items(id,meal_id,food_code,grams,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?,?,?)',
-                                 (str(uuid.uuid4()),meal_id,item.food_code,item.grams,*vals))
+                                 (item_id,meal_id,item.food_code or '',item.grams,*vals))
+                if original is not None:
+                    provenance={**receipt['provenance'],'recognition_id':body.recognition_id,
+                                'recognition_index':item.recognition_index,'original_grams':original['estimated_grams']}
+                    await db.execute('''INSERT INTO meal_item_estimates(meal_item_id,name,preparation,source_type,
+                        source_model,basis_g,verified,nutrition_json,provenance_json) VALUES(?,?,?,?,?,?,?,?,?)''',
+                        (item_id,original['name'],original.get('preparation',''),'ai_estimate',original.get('source_model',''),
+                         100,0,json.dumps(food),json.dumps(provenance)))
             await db.commit()
         except Exception:
             await db.rollback()
@@ -288,8 +313,16 @@ async def list_meals(day:date|None=None,user:str=Depends(current_user)):
         cur=await db.execute('SELECT * FROM meals WHERE user_id=? AND eaten_at>=? AND eaten_at<? ORDER BY eaten_at DESC',(user,day_begin,day_end))
         meals=[rowdict(r) for r in await cur.fetchall()]
         for meal in meals:
-            cur=await db.execute('SELECT i.*, f.name FROM meal_items i JOIN foods f ON f.code=i.food_code WHERE i.meal_id=?',(meal['id'],))
+            cur=await db.execute('''SELECT i.*, COALESCE(e.name,f.name,'未命名食物') AS name,
+                e.source_type,e.source_model,e.preparation,e.basis_g,e.verified,e.nutrition_json
+                FROM meal_items i LEFT JOIN foods f ON f.code=i.food_code
+                LEFT JOIN meal_item_estimates e ON e.meal_item_id=i.id WHERE i.meal_id=?''',(meal['id'],))
             meal['items']=[rowdict(r) for r in await cur.fetchall()]
+            for item in meal['items']:
+                item['food_code']=item['food_code'] or None
+                nutrition_json=item.pop('nutrition_json')
+                item['nutrition']=json.loads(nutrition_json) if nutrition_json else None
+                item['verified']=bool(item['verified'])
     return meals
 
 LOCAL_TZ = ZoneInfo('Asia/Shanghai')
