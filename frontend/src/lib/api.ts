@@ -1,11 +1,12 @@
 export interface Food {code:string;name:string;kcal:number;protein:number;fat:number;carbs:number;category?:string;preparation?:string;aliases?:string[];source_type?:string;source_model?:string;batch_id?:string;basis_g?:number;verified?:boolean}
-export interface MealItem {id:string;food_code:string;grams:number;kcal:number;protein:number;fat:number;carbs:number;name:string}
+export interface NutritionEstimate {basis_g:100;kcal:number;protein:number;fat:number;carbs:number}
+export interface MealItem {id:string;food_code:string|null;grams:number;kcal:number;protein:number;fat:number;carbs:number;name:string;source_type?:string;verified?:boolean;preparation?:string;nutrition?:NutritionEstimate|null}
 export interface Meal {id:string;meal_type:string;eaten_at:string;image_id:string|null;items:MealItem[]}
 export interface Summary {days:number;daily:{day:string;kcal:number;protein:number;fat:number;carbs:number}[];totals:{kcal:number;protein:number;fat:number;carbs:number}}
 export interface Profile {user_id:string;name:string;age:number|null;height_cm:number|null;weight_kg:number|null;goal:string}
 export interface NutritionReport {id:string;days:number;content:string;source:string;summary:Summary&{recorded_days:number}}
 export interface ReportMeta {id:string;days:number;source:string;created_at:string}
-export interface Recognized {name:string;estimated_grams:number;food_code:string|null;preparation?:string;match_status?:string;matched_name?:string|null;match_note?:string;candidates?:Food[]}
+export interface Recognized {name:string;estimated_grams:number;food_code:string|null;preparation?:string;match_status?:string;matched_name?:string|null;match_note?:string;candidates?:Food[];nutrition?:NutritionEstimate;source_model?:string;source_type?:string;verified?:boolean}
 
 const fieldNames:Record<string,string>={email:'邮箱',password:'密码',name:'昵称',age:'年龄',height_cm:'身高',weight_kg:'体重',goal:'健康目标',grams:'重量',food_code:'食物',message:'消息',items:'食物记录'}
 function readableError(data:unknown,status:number):string {

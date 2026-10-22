@@ -73,6 +73,8 @@ async def cleanup(user_id, email):
         if not row or row['email'] != email or not email.startswith('bench-'):
             raise ValueError('Cleanup identity mismatch')
         images = await (await database.execute('SELECT path FROM images WHERE user_id=?', (user_id,))).fetchall()
+        await database.execute('DELETE FROM meal_item_estimates WHERE meal_item_id IN (SELECT i.id FROM meal_items i JOIN meals m ON m.id=i.meal_id WHERE m.user_id=?)', (user_id,))
+        await database.execute('DELETE FROM meal_recognitions WHERE user_id=?', (user_id,))
         await database.execute('DELETE FROM meal_items WHERE meal_id IN (SELECT id FROM meals WHERE user_id=?)', (user_id,))
         for table in ('meals', 'chat_messages', 'nutrition_reports', 'sessions', 'profiles', 'images'):
             await database.execute(f'DELETE FROM {table} WHERE user_id=?', (user_id,))

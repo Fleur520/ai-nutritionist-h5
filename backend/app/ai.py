@@ -13,6 +13,7 @@ import httpx
 from fastapi import HTTPException
 
 from .config import get_settings
+from .meal_estimates import nutrition_estimate
 
 log = logging.getLogger(__name__)
 DEMO_FOODS = [
@@ -81,9 +82,11 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
         raise HTTPException(503, '尚未配置多模态模型 VLLM_VISION_URL')
     img = base64.b64encode(path.read_bytes()).decode('ascii')
     prompt = ('识别图中的食物。只输出有效JSON对象：'
-              '{"items":[{"name":"食物名称","estimated_grams":120}]}。'
+              '{"items":[{"name":"食物名称","estimated_grams":120,"preparation":"煮熟",'
+              '"nutrition":{"basis_g":100,"kcal":100,"protein":5,"fat":4,"carbs":11}}]}。'
               '最多8项；无法确定食物时 items 为空数组。重量只是粗略估计，'
-              '用户必须人工确认。不要生成热量或营养素。')
+              '用户可以人工确认。根据可见食物、做法与用油估算每100克可食部的热量千卡和三大营养素克数，'
+              '不是整份营养；所有数值非负，热量最多930，三大营养素合计不超过100克。')
     payload = {'model': s.vllm_vision_model or s.vllm_model,
                'messages': [{'role': 'user', 'content': [
                    {'type': 'text', 'text': prompt},
@@ -110,9 +113,13 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
         items = result['items']
         if not isinstance(items, list):
             raise ValueError('items should be a list')
-        return [{'name': str(x.get('name', '未知食物'))[:80],
+        result = [{'name': str(x.get('name', '未知食物'))[:80],
                  'estimated_grams': max(5, min(3000, float(x.get('estimated_grams') or 100))),
+                 'preparation':str(x.get('preparation') or '')[:32],
+                 **({'nutrition':nutrition_estimate(x['nutrition']), 'source_type':'ai_estimate', 'verified':False,
+                     'source_model':s.vllm_vision_model or s.vllm_model} if 'nutrition' in x else {}),
                  'food_code': None} for x in items[:8] if isinstance(x, dict)]
+        return result
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         log.warning('Multimodal request failed: %s', type(exc).__name__)
         raise HTTPException(502, '多模态识别失败，请重试或手动记录') from exc

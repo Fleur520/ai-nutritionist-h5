@@ -5,9 +5,9 @@ import { api, jsonBody, type Food, type Recognized } from '../lib/api'
 import FoodPicker from '../components/FoodPicker.vue'
 
 const emit = defineEmits<{ go: [value: string] }>()
-const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
+const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), recognitionId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
 const foods = ref<Food[]>([]), foodsLoading = ref(true), foodsError = ref('')
-const items = ref<(Recognized & { food_code: string; rowId: number; originalFoodCode?: string; manualSelection?: boolean })[]>([])
+const items = ref<(Recognized & { food_code: string; rowId: number; originalFoodCode?: string; manualSelection?: boolean; recognitionIndex?: number; nutritionSource: 'model' | 'catalog' })[]>([])
 let nextRowId=0
 const foodsByCode = computed(() => new Map(foods.value.map(food => [food.code, food])))
 const uploadRequest = new AbortController()
@@ -26,6 +26,7 @@ function hasMatchingInfo(item: ScanItem) { return typeof item.match_status === '
 function chooseFood(item: ScanItem, code: string) {
   if (saving.value || foodsLoading.value || code && !foodsByCode.value.has(code)) return
   item.food_code = code
+  if (!code && item.nutrition) item.nutritionSource = 'model'
   item.manualSelection = true
 }
 function matchingLabel(item: ScanItem) {
@@ -74,8 +75,11 @@ function validWeight(item: ScanItem) {
   return Number.isFinite(grams) && grams >= 5 && grams <= 3000
 }
 function itemEnergy(item: ScanItem): number | null {
-  const food = selectedFood(item)
+  const food = nutritionReference(item)
   return food && validWeight(item) ? food.kcal * Number(item.estimated_grams) / 100 : null
+}
+function nutritionReference(item: ScanItem) {
+  return item.nutritionSource === 'model' ? item.nutrition : selectedFood(item)
 }
 function energyText(value: number) { return Number(value.toFixed(1)).toString() }
 const calculatedCount = computed(() => items.value.filter(item => itemEnergy(item) !== null).length)
@@ -84,7 +88,7 @@ const complete = computed(() => items.value.length > 0 && calculatedCount.value 
 function add() {
   if (busy.value || saving.value) return
   if (items.value.length >= 30) { error.value = '一餐最多记录 30 项食物。'; return }
-  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '', rowId:++nextRowId })
+  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '', rowId:++nextRowId, nutritionSource: 'catalog' })
 }
 function upload() { if (!busy.value && !saving.value) fileRef.value?.click() }
 async function onFile(event: Event) {
@@ -96,17 +100,20 @@ async function onFile(event: Event) {
   if (preview.value) URL.revokeObjectURL(preview.value)
   preview.value = URL.createObjectURL(file)
   imageId.value = ''
+  recognitionId.value = ''
   items.value = []
   busy.value = true; error.value = ''; notice.value = ''
   try {
     const form = new FormData(); form.append('file', file)
     const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
     imageId.value = result.id
-    const recognized = await api<{ items: Recognized[]; notice: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
+    const recognized = await api<{ items: Recognized[]; recognition_id: string; notice: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
     // A catalog update can add a valid code while this page is already open.
     // Refresh once before binding, so a correct server match is not invisible.
     if (recognized.items.some(item=>item.food_code && !foodsByCode.value.has(item.food_code))) await loadFoods()
-    items.value = recognized.items.map(item => ({ ...item, rowId:++nextRowId, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false,
+    recognitionId.value = recognized.recognition_id
+    items.value = recognized.items.map((item, index) => ({ ...item, rowId:++nextRowId, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false,
+      recognitionIndex: index, nutritionSource: item.nutrition ? 'model' : 'catalog',
       match_status: item.match_status || (item.food_code ? 'matched' : 'no_evidence') }))
     const count=items.value.filter(item=>item.food_code).length
     notice.value = `已匹配 ${count}/${items.value.length} 项${recognized.elapsed_ms ? ` · 用时 ${(recognized.elapsed_ms/1000).toFixed(1)} 秒` : ''}。` + recognized.notice
@@ -116,10 +123,11 @@ async function onFile(event: Event) {
 }
 async function save() {
   if (saving.value || busy.value) return
-  if (!complete.value) { error.value = '请为每项选择对应食物，并填写 5～3000 克的重量。'; return }
+  if (!complete.value) { error.value = '请确认每项重量与营养数据；没有模型估算的项目可选择食品库参考。'; return }
   saving.value = true; error.value = ''
   try {
-    await api('/meals', { method: 'POST', body: jsonBody({ meal_type: mealType.value, eaten_at: new Date().toISOString(), image_id: imageId.value || null, items: items.value.map(item => ({ food_code: item.food_code, grams: item.estimated_grams })) }) })
+    await api('/meals', { method: 'POST', body: jsonBody({ meal_type: mealType.value, eaten_at: new Date().toISOString(), image_id: imageId.value || null, recognition_id: recognitionId.value || null,
+      items: items.value.map(item => ({ food_code: item.food_code || null, grams: item.estimated_grams, nutrition_source: item.nutritionSource, recognition_index: item.recognitionIndex })) }) })
     if (!disposed) emit('go', 'history')
   } catch (failure) { error.value = failure instanceof Error ? failure.message : '保存失败，请稍后重试' }
   finally { saving.value = false }
@@ -148,37 +156,43 @@ async function save() {
           <p v-if="usesLegacyReference(item)" class="matching-reference">这条参考记录只标注了“熟”，没有具体做法，请确认是否适合这一餐。</p>
         </template>
         <template v-else>
-          <p class="matching-reason">{{ matchingReason(item) }}</p>
+          <p class="matching-reason">{{ item.nutrition ? '未确认食品库对应项，可直接按照片 AI 估算保存。' : matchingReason(item) }}</p>
           <p v-if="item.preparation" class="matching-preparation">照片参考做法：{{ item.preparation }}</p>
           <div v-if="relevantCandidates(item).length" class="matching-candidates">
-            <span class="matching-candidates-label">可能相近的食物 · 点选后才计入能量</span>
+            <span class="matching-candidates-label">可能相近的食物 · 可选关联食品库</span>
             <button v-for="food in relevantCandidates(item)" :key="food.code" type="button" class="candidate-button" :disabled="saving || foodsLoading" :aria-label="'选择食品库食物：' + food.name + '，' + (food.preparation || '做法未注明')" @click="chooseFood(item, food.code)">
               <span><strong>{{ food.name }}</strong><small>{{ food.preparation || '做法未注明' }}</small></span><ArrowRight :size="16" aria-hidden="true" />
             </button>
           </div>
         </template>
       </div>
-      <FoodPicker :model-value="item.food_code" :foods="foods" :initial-query="!item.food_code && hasMatchingInfo(item) ? item.name : ''" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
+      <FoodPicker :model-value="item.food_code" :foods="foods" :optional="!!item.nutrition" :initial-query="!item.food_code && hasMatchingInfo(item) ? item.name : ''" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
+      <div v-if="item.nutrition" class="nutrition-choice">
+        <span>营养计算依据</span>
+        <div><button type="button" :class="{ active: item.nutritionSource === 'model' }" :disabled="saving" :aria-pressed="item.nutritionSource === 'model'" @click="item.nutritionSource = 'model'">照片 AI 估算</button><button type="button" :class="{ active: item.nutritionSource === 'catalog' }" :disabled="saving || !selectedFood(item)" :aria-pressed="item.nutritionSource === 'catalog'" @click="item.nutritionSource = 'catalog'">食品库参考</button></div>
+        <small>{{ item.nutritionSource === 'model' ? '未匹配食品库也可保存；关联食物不会覆盖照片估算。' : '已改用所选食品库的每 100 克营养值。' }}</small>
+      </div>
       <div class="weight-row"><label>估计重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5" inputmode="decimal" :disabled="saving" :aria-invalid="!validWeight(item)" /></label><div class="item-calories"><span>这份食物</span><strong>{{ itemEnergy(item) === null ? '—' : energyText(itemEnergy(item) || 0) }}<small> kcal</small></strong></div></div>
       <p class="food-energy" :class="{ pending: itemEnergy(item) === null }" aria-live="polite">
-        <template v-if="!selectedFood(item)">请选择对应食物，再计算这一份的能量。</template>
-        <template v-else-if="!validWeight(item)">重量请填写 5～3000 克。</template>
-        <template v-else>{{ selectedFood(item)?.kcal }} kcal/100g × {{ item.estimated_grams }}g ÷ 100</template>
+        <template v-if="!validWeight(item)">重量请填写 5～3000 克。</template>
+        <template v-else-if="!nutritionReference(item)">暂未获得模型营养估算，请重新识别或选择食品库参考。</template>
+        <template v-else>{{ nutritionReference(item)?.kcal }} kcal/100g × {{ item.estimated_grams }}g ÷ 100</template>
       </p>
-      <p v-if="selectedFood(item)" class="food-source">{{ selectedFood(item)?.source_type === 'ai_estimate' ? 'AI 估算 · 未核验' : '原有演示数据' }} · 每 100 克可食部<span v-if="selectedFood(item)?.preparation"> · {{ selectedFood(item)?.preparation }}</span></p>
+      <p v-if="nutritionReference(item)" class="food-source">{{ item.nutritionSource === 'model' ? '照片 AI 估算 · 未核验' : selectedFood(item)?.source_type === 'ai_estimate' ? '食品库 AI 估算 · 未核验' : '食品库参考数据' }} · 每 100 克可食部<span v-if="item.nutritionSource === 'model' ? item.preparation : selectedFood(item)?.preparation"> · {{ item.nutritionSource === 'model' ? item.preparation : selectedFood(item)?.preparation }}</span></p>
     </article>
     <div v-if="items.length" class="result-bottom">
       <label class="form-label">记在哪一餐<select v-model="mealType" :disabled="saving"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select></label>
-      <div class="sum-line" aria-live="polite"><span>{{ !complete ? '已匹配食物小计' : '本餐估算能量' }}</span><strong>{{ energyText(total) }} <small>kcal</small></strong></div>
-      <p class="energy-rule">按每 100 克食物能量 × 实际重量计算，再相加。调整食物或重量，估算会实时更新。</p>
-      <p v-if="!complete" class="energy-warning" role="status">已计入 {{ calculatedCount }}/{{ items.length }} 项。补齐食物与重量后，就可以保存整餐记录。</p>
+      <div class="sum-line" aria-live="polite"><span>{{ !complete ? '已估算食物小计' : '本餐估算能量' }}</span><strong>{{ energyText(total) }} <small>kcal</small></strong></div>
+      <p class="energy-rule">优先使用照片 AI 返回的重量与每 100 克营养，未匹配食品库也能保存。修改重量后按比例更新；也可主动切换为食品库参考。</p>
+      <p v-if="!complete" class="energy-warning" role="status">已计入 {{ calculatedCount }}/{{ items.length }} 项。请检查重量；缺少模型估算的项目可重新识别或选择食品库参考。</p>
       <button type="button" class="primary-button" @click="save" :disabled="saving || busy || !complete"><Check :size="19" />{{ saving ? '正在保存这一餐…' : '保存这一餐' }}</button>
     </div>
-    <p class="microcopy">食品库包含未经实验核验的 AI 营养估算。请选择相应的食物与生熟状态；配料、烹调方式和用油会影响实际营养。</p>
+    <p class="microcopy">照片与食品库中的 AI 估算均未经实验核验。配料、烹调方式和用油会影响实际营养。</p>
   </section>
 </template>
 
 <style scoped>
+.nutrition-choice{display:grid;gap:8px;margin-top:16px;color:#5e7565;font-size:13px}.nutrition-choice>div{display:flex;gap:8px}.nutrition-choice button{flex:1;min-height:44px;border:1px solid #dfe8df;border-radius:11px;background:#fafcf9;color:#5e7565;font:inherit}.nutrition-choice button.active{background:#eaf3ec;border-color:#76a68a;color:#245b43;font-weight:600}.nutrition-choice button:disabled{opacity:.5}.nutrition-choice small{font-size:12px;line-height:1.7;color:#7b8d81}
 .upload-card{width:100%;font:inherit;color:inherit;padding:0}.upload-card:disabled{opacity:1}.section-copy{margin:5px 0 0;font-size:12px;line-height:1.5;color:#7b8d81}.scan-empty{display:flex;flex-direction:column;align-items:center;gap:12px;background:white;border:1px solid #e5ebe5;padding:28px 18px}.scan-empty>svg{color:#8eac8c}.scan-empty strong{font-size:16px;color:#496b50}.scan-empty p{margin:0;font-size:14px;line-height:1.8;color:#7b8e80}.scan-progress small{display:block;font-size:12px;color:#7b8e80;margin-top:3px}.scan-progress>svg{flex-shrink:0}.food-head>div{display:flex;align-items:center;gap:9px;min-width:0}.food-head strong{overflow-wrap:anywhere}.food-index{font-size:12px;color:#839a85;border-radius:8px;background:#f0f5ed;padding:5px 7px;font-weight:600}.food-head .icon-button{min-width:44px;min-height:44px;flex-shrink:0}.food-energy{font-size:12px;line-height:1.7;color:#6d8773;margin:10px 0 0;overflow-wrap:anywhere}.food-energy.pending{color:#9e713f}.energy-rule{font-size:12px;line-height:1.8;color:#77897d;margin:0 0 16px}.energy-warning{font-size:13px;line-height:1.8;color:#8c622d;background:#fff5e9;border-radius:13px;padding:12px 14px;margin:0 0 16px}.weight-row{margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:end}.weight-row label{display:grid;gap:8px;font-size:13px;font-weight:500;color:#5e7565}.weight-row input{width:100%;min-width:0;box-sizing:border-box;border:1px solid #dfe8df;border-radius:12px;padding:11px 12px;color:#304e3a;background:#fafcf9;font-size:16px;min-height:48px}.weight-row input[aria-invalid=true]{border-color:#d9ad7a}.item-calories{padding:0 5px 8px;text-align:right}.item-calories>span{display:block;font-size:12px;color:#8a9a8e;margin-bottom:7px}.item-calories strong{font-size:23px;font-weight:700;color:#245b43;letter-spacing:-.5px}.item-calories small{font-size:12px;color:#819487;letter-spacing:0;font-weight:400}.food-source{font-size:11px;line-height:1.8;color:#8d805b;margin:5px 0 0}.result-bottom{background:white;border:1px solid #e5ebe5;border-radius:22px;padding:20px}.food-load-error{display:flex;gap:8px;align-items:center;justify-content:space-between}.food-load-error .text-action{min-width:60px;min-height:44px}.sum-line{margin:19px 0 12px}.scan-page .text-action{min-height:44px;padding:4px 0;flex-shrink:0;font-size:13px}.scan-page .section-header{align-items:center}
 .matching-info{margin:-2px 0 16px}.matching-tag{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:9px;background:#edf5ee;color:#32644a;font-size:12px;font-weight:500}.matching-reference,.matching-reason{margin:9px 0 0;padding:11px 13px;border:1px solid #f0e3cf;border-radius:12px;background:#fff9ef;color:#88683e;font-size:13px;line-height:1.75;overflow-wrap:anywhere}.matching-reason{margin:0}.matching-preparation{margin:7px 0 0;color:#7b8d81;font-size:12px;line-height:1.6}.matching-candidates{display:grid;gap:7px;margin-top:12px}.matching-candidates-label{font-size:12px;color:#7b8d81;line-height:1.6}.candidate-button{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:48px;padding:10px 12px;border:1px solid #dfe8df;border-radius:12px;background:#fafcf9;color:#315b42;text-align:left;cursor:pointer;font:inherit}.candidate-button>span{display:grid;gap:3px;min-width:0}.candidate-button strong{font-size:13px;font-weight:500;line-height:1.5;overflow-wrap:anywhere}.candidate-button small{font-size:11px;line-height:1.5;color:#7b8d81}.candidate-button>svg{flex-shrink:0;color:#819c87}.candidate-button:hover{border-color:#9abb9d;background:#f1f7ee}.candidate-button:focus-visible{outline:2px solid #72a37b;outline-offset:2px}.candidate-button:disabled{opacity:.55;cursor:default}
 </style>

@@ -1,7 +1,7 @@
 """BiSheng image upload and v1.3.1 workflow invocation without admin sessions.
 
-Only the workflow's structured output is retained. Database matching and all
-nutrition calculations remain the caller's responsibility.
+Only bounded structured output is retained, including optional per-100g visual
+nutrition estimates. The caller reconciles catalog identities and meal totals.
 """
 import asyncio
 import json
@@ -17,6 +17,7 @@ import httpx
 from fastapi import HTTPException
 
 from .config import get_settings
+from .meal_estimates import nutrition_estimate
 
 
 log = logging.getLogger(__name__)
@@ -174,6 +175,11 @@ def _structured_items(message, timings=None):
             'retrieval_evidence': [_evidence(entry) for entry in evidence],
             'snapshot_id': snapshot,
         }
+        if 'nutrition' in item:
+            cleaned['nutrition'] = nutrition_estimate(item['nutrition'])
+            cleaned['source_type'] = 'ai_estimate'
+            cleaned['verified'] = False
+            cleaned['source_model'] = _bounded_text(item.get('source_model'), 128)
         if 'retrieved_codes' in item:
             codes = item['retrieved_codes']
             if not isinstance(codes, list) or len(codes) > 32:

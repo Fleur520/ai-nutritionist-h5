@@ -18,6 +18,7 @@ from app.db import connect
 async def cleanup(user_id):
     async with connect() as db:
         images = await (await db.execute('SELECT id FROM images WHERE user_id=?', (user_id,))).fetchall()
+        await db.execute('DELETE FROM meal_recognitions WHERE user_id=?', (user_id,))
         for table in ('images', 'sessions', 'profiles'):
             await db.execute(f'DELETE FROM {table} WHERE user_id=?', (user_id,))
         await db.execute('DELETE FROM users WHERE id=?', (user_id,))
