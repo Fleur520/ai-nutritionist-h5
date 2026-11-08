@@ -2,6 +2,7 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { CalendarDays, Flame, RefreshCw, Utensils, ArrowRight, LoaderCircle } from 'lucide-vue-next'
 import { api, type Meal, type Summary } from '../lib/api'
+import ImageViewer from '../components/ImageViewer.vue'
 
 const emit = defineEmits<{ go: [value: string] }>()
 function chinaDay() {
@@ -11,6 +12,7 @@ function chinaDay() {
 }
 const today = chinaDay()
 const day = ref(today), meals = ref<Meal[]>([]), summary = ref<Summary | null>(null), loading = ref(true), error = ref('')
+const photo = ref('')
 const label: Record<string, string> = { breakfast: '早餐', lunch: '午餐', dinner: '晚餐', snack: '加餐' }
 let requestId = 0
 async function reload() {
@@ -72,12 +74,14 @@ const nutrition = (value: number | undefined) => Number((value || 0).toFixed(1))
       <article v-for="meal in meals" :key="meal.id" class="meal-card">
         <div class="meal-head"><div><span class="meal-dot"></span><strong>{{ label[meal.meal_type] || meal.meal_type }}</strong><small>{{ mealTime(meal.eaten_at) }}</small></div><strong>{{ Math.round(total(meal)) }} <small>kcal</small></strong></div>
         <div v-for="item in meal.items" :key="item.id" class="meal-line"><span>{{ item.name }}<small>{{ item.grams }} 克<span v-if="item.source_type === 'ai_estimate'"> · 照片 AI 估算 · 未核验</span></small></span><span>{{ nutrition(item.kcal) }} kcal</span></div>
-        <img v-if="meal.image_id" :src="'/api/images/' + meal.image_id" class="meal-photo" alt="本餐照片" loading="lazy" />
+        <button v-if="meal.image_id" type="button" class="meal-photo-button" aria-label="查看本餐照片" @click="photo = '/api/images/' + meal.image_id"><img :src="'/api/images/' + meal.image_id" class="meal-photo" alt="本餐照片" loading="lazy" /><span>查看照片</span></button>
       </article>
     </template>
+    <ImageViewer v-if="photo" :src="photo" title="本餐照片" @close="photo = ''" />
   </section>
 </template>
 
 <style scoped>
+.meal-photo-button{display:inline-flex;align-items:center;gap:12px;padding:0;background:none;color:#55765a;font-size:12px;min-height:44px}.meal-photo-button .meal-photo{margin-top:0}.meal-photo-button{margin-top:12px}
 .section-copy{margin:5px 0 0;font-size:12px;line-height:1.5;color:#7b8d81}.history-section-header{align-items:center;flex-wrap:wrap}.date-control{min-height:44px;background:white}.date-control input{min-height:32px;max-width:138px;width:138px;font-size:14px;padding:0}.journal-state{display:flex;flex-direction:column;align-items:center;gap:12px;padding:30px 20px;background:white;border:1px solid #e5ebe5}.journal-state strong{color:#355b44;font-size:16px}.journal-state p{font-size:14px;line-height:1.8;margin:0;color:#7a8a7f;overflow-wrap:anywhere}.journal-empty-icon{width:56px;height:56px;border-radius:18px;display:grid;place-items:center;background:#edf3e9;color:#5b805d}.journal-error{background:#fff9f5}.secondary-action{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;border-radius:12px;padding:10px 17px;background:#edf4ec;color:#245b43;font-size:14px;font-weight:600}.meal-line{align-items:flex-start;gap:12px}.meal-line>span:first-child{min-width:0;overflow-wrap:anywhere}.meal-line>span:last-child{white-space:nowrap}.meal-line small{display:block;font-size:12px;color:#8b998f;margin-top:3px}.meal-head{gap:8px}.meal-head>div{flex-wrap:wrap}.meal-head>strong{white-space:nowrap}.report-breakdown b{font-weight:600}
 </style>

@@ -5,7 +5,7 @@ import { api, streamMessage } from '../lib/api'
 import MarkdownContent from '../components/MarkdownContent.vue'
 
 type ReplyState = 'streaming' | 'complete' | 'stopped' | 'failed'
-interface ChatMessage { id: number; role: 'user' | 'assistant'; content: string; state?: ReplyState }
+interface ChatMessage { id: number; role: 'user' | 'assistant'; content: string; state?: ReplyState; error?: string }
 function makeThreadId() {
   const bytes = new Uint8Array(16)
   if (typeof globalThis.crypto?.getRandomValues === 'function') globalThis.crypto.getRandomValues(bytes)
@@ -74,7 +74,10 @@ async function send(input?: string) {
   } catch (cause) {
     if (disposed) return
     if (request?.signal.aborted) messages.value[replyIndex].state = 'stopped'
-    else { messages.value[replyIndex].state = 'failed'; error.value = cause instanceof Error ? cause.message : '回复暂时中断了，请稍后重试。' }
+    else {
+      messages.value[replyIndex].state = 'failed'
+      messages.value[replyIndex].error = cause instanceof Error ? cause.message : '回复暂时中断了，请稍后重试。'
+    }
   } finally {
     request = null
     if (!disposed) { busy.value = false; void scrollToBottom() }
@@ -141,8 +144,8 @@ onBeforeUnmount(() => { disposed = true; request?.abort(); if (copyTimeout) clea
           <div v-else class="conversation-assistant-card" :aria-busy="message.state === 'streaming'">
             <MarkdownContent v-if="message.content" :content="message.content" />
             <div v-else-if="message.state === 'streaming'" class="conversation-thinking" role="status"><span></span><span></span><span></span><small>正在想一份适合你的建议</small></div>
-            <p v-else class="conversation-empty-reply">{{ message.state === 'stopped' ? '已停止回答，想聊什么可以继续问我。' : '暂时没有收到回复，请再试一次。' }}</p>
-            <div v-if="message.state === 'failed' || message.state === 'stopped'" class="conversation-reply-status">{{ message.state === 'failed' && message.content ? '回复中断，以上内容可能不完整' : message.state === 'stopped' ? '回答已停止' : '回复未完成' }}</div>
+            <p v-else class="conversation-empty-reply" :role="message.state === 'failed' ? 'alert' : undefined">{{ message.state === 'stopped' ? '已停止回答，想聊什么可以继续问我。' : message.error || '暂时没有收到回复，请再试一次。' }}</p>
+            <div v-if="message.state === 'failed' || message.state === 'stopped'" class="conversation-reply-status">{{ message.state === 'failed' && message.content ? '回复中断，以上内容可能不完整' : message.state === 'stopped' ? '回答已停止' : '问题已保留，点击下方重新回答' }}</div>
           </div>
           <div v-if="message.role === 'assistant' && message.state !== 'streaming'" class="conversation-message-tools">
             <button v-if="message.content" type="button" :aria-label="copiedId === message.id ? '已复制回复' : '复制回复'" @click="copyReply(message)"><Check v-if="copiedId === message.id" :size="14" /><Copy v-else :size="14" /><span>{{ copiedId === message.id ? '已复制' : '复制' }}</span></button>

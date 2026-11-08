@@ -1,198 +1,158 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { Camera, Check, LoaderCircle, Plus, Trash2, ArrowRight, Utensils, RefreshCw } from 'lucide-vue-next'
+import { ref, computed, onBeforeUnmount } from 'vue'
+import { Camera, Images, Expand, Check, LoaderCircle, Plus, Trash2, Utensils, RefreshCw } from 'lucide-vue-next'
 import { api, jsonBody, type Food, type Recognized } from '../lib/api'
 import FoodPicker from '../components/FoodPicker.vue'
+import ImageViewer from '../components/ImageViewer.vue'
 
 const emit = defineEmits<{ go: [value: string] }>()
-const fileRef = ref<HTMLInputElement | null>(null), preview = ref(''), imageId = ref(''), recognitionId = ref(''), busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), mealType = ref('lunch')
-const foods = ref<Food[]>([]), foodsLoading = ref(true), foodsError = ref('')
-const items = ref<(Recognized & { food_code: string; rowId: number; originalFoodCode?: string; manualSelection?: boolean; recognitionIndex?: number; nutritionSource: 'model' | 'catalog' })[]>([])
-let nextRowId=0
+type ScanItem = Recognized & { rowId: number; recognitionIndex?: number; nutritionSource: 'model' | 'catalog' }
+const albumRef = ref<HTMLInputElement | null>(null), cameraRef = ref<HTMLInputElement | null>(null)
+const preview = ref(''), viewingPhoto = ref(false), imageId = ref(''), recognitionId = ref('')
+const busy = ref(false), saving = ref(false), error = ref(''), notice = ref(''), stage = ref('')
+const chinaHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', hour: '2-digit', hourCycle: 'h23' }).format(new Date()))
+const mealType = ref(chinaHour < 10 ? 'breakfast' : chinaHour < 15 ? 'lunch' : chinaHour < 21 ? 'dinner' : 'snack')
+const foods = ref<Food[]>([]), foodsLoading = ref(false), foodsError = ref('')
+const items = ref<ScanItem[]>([]), saved = ref(false)
+let nextRowId = 0, disposed = false
+let selectedFile: File | null = null
+let uploadFile: File | null = null
+const request = new AbortController()
 const foodsByCode = computed(() => new Map(foods.value.map(food => [food.code, food])))
-const uploadRequest = new AbortController()
-let disposed = false
 async function loadFoods() {
   foodsLoading.value = true; foodsError.value = ''
-  try { foods.value = await api<Food[]>('/foods') }
-  catch { foodsError.value = '食品库暂时没有加载出来，请重试。' }
+  try { foods.value = await api<Food[]>('/foods', { signal: request.signal }) }
+  catch { if (!disposed) foodsError.value = '手动记餐的数据暂时无法加载，请重试。' }
   finally { foodsLoading.value = false }
 }
-onMounted(loadFoods)
-onBeforeUnmount(() => { disposed = true; uploadRequest.abort(); if (preview.value) URL.revokeObjectURL(preview.value) })
-type ScanItem = (typeof items.value)[number]
-function selectedFood(item: ScanItem) { return foodsByCode.value.get(item.food_code) }
-function hasMatchingInfo(item: ScanItem) { return typeof item.match_status === 'string' }
-function chooseFood(item: ScanItem, code: string) {
-  if (saving.value || foodsLoading.value || code && !foodsByCode.value.has(code)) return
-  item.food_code = code
-  if (!code && item.nutrition) item.nutritionSource = 'model'
-  item.manualSelection = true
-}
-function matchingLabel(item: ScanItem) {
-  return item.match_status === 'matched' && item.food_code === item.originalFoodCode && !item.manualSelection
-    ? '已匹配食品库' : '已手动选择食物'
-}
-function usesLegacyReference(item: ScanItem) {
-  return item.match_note === 'legacy_cooked_reference' && item.food_code === item.originalFoodCode
-}
-function matchingReason(item: ScanItem) {
-  switch (item.match_status) {
-    case 'ambiguous': return '有几种相近的食物，名称或做法还不能确定，请你选一下。'
-    case 'preparation_conflict': return '照片中的做法与食品库记录不同，请核对生熟和烹调方式后选择。'
-    case 'name_mismatch': return '找到的食物与照片名称不完全一致，请核对后选择。'
-    case 'stale_candidate': return '食品库记录已有更新，请重新选择对应食物。'
-    case 'no_evidence':
-    case 'not_found': return '暂时没有找到合适的食品库记录，可以换个名称搜索。'
-    default: return '还不能确定对应食物，请你从食品库中选一下。'
-  }
-}
-const cleanFoodName = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
-function suggestionScore(name: string, food: Food) {
-  const target = cleanFoodName(name)
-  if (!target) return 0
-  const parts = new Set(Array.from({ length: Math.max(0, target.length - 1) }, (_, index) => target.slice(index, index + 2)))
-  return Math.max(0, ...[food.name, ...(food.aliases || [])].map(label => {
-    const candidate = cleanFoodName(label)
-    if (candidate === target) return 4
-    if (target.length >= 2 && candidate.includes(target) || candidate.length >= 2 && target.includes(candidate)) return 3
-    return [...parts].some(part => candidate.includes(part)) ? 1 : 0
-  }))
-}
-function relevantCandidates(item: ScanItem) {
-  const unique = new Set<string>()
-  return (item.candidates || []).flatMap(candidate => {
-    // Names, preparation and nutrition always come from the current /foods data.
-    const food = foodsByCode.value.get(candidate.code)
-    if (!food || unique.has(food.code)) return []
-    unique.add(food.code)
-    const score = suggestionScore(item.name, food)
-    return score ? [{ food, score }] : []
-  }).sort((left, right) => right.score - left.score).slice(0, 3).map(entry => entry.food)
-}
-function validWeight(item: ScanItem) {
-  const grams = Number(item.estimated_grams)
-  return Number.isFinite(grams) && grams >= 5 && grams <= 3000
-}
-function itemEnergy(item: ScanItem): number | null {
-  const food = nutritionReference(item)
-  return food && validWeight(item) ? food.kcal * Number(item.estimated_grams) / 100 : null
-}
-function nutritionReference(item: ScanItem) {
-  return item.nutritionSource === 'model' ? item.nutrition : selectedFood(item)
-}
-function energyText(value: number) { return Number(value.toFixed(1)).toString() }
-const calculatedCount = computed(() => items.value.filter(item => itemEnergy(item) !== null).length)
-const total = computed(() => items.value.reduce((sum, item) => sum + (itemEnergy(item) ?? 0), 0))
+onBeforeUnmount(() => { disposed = true; request.abort(); if (preview.value) URL.revokeObjectURL(preview.value) })
+function reference(item: ScanItem) { return item.nutritionSource === 'model' ? item.nutrition : foodsByCode.value.get(item.food_code || '') }
+function validWeight(item: ScanItem) { return Number.isFinite(item.estimated_grams) && item.estimated_grams >= 5 && item.estimated_grams <= 3000 }
+function amount(item: ScanItem, key: 'kcal' | 'protein' | 'fat' | 'carbs') { return reference(item) && validWeight(item) ? reference(item)![key] * item.estimated_grams / 100 : null }
+function display(value: number | null) { return value === null ? '—' : Number(value.toFixed(1)).toString() }
+const totals = computed(() => items.value.reduce((sum, item) => {
+  for (const key of ['kcal', 'protein', 'fat', 'carbs'] as const) sum[key] += amount(item, key) ?? 0
+  return sum
+}, { kcal: 0, protein: 0, fat: 0, carbs: 0 }))
+const calculatedCount = computed(() => items.value.filter(item => amount(item, 'kcal') !== null).length)
 const complete = computed(() => items.value.length > 0 && calculatedCount.value === items.value.length)
 function add() {
-  if (busy.value || saving.value) return
-  if (items.value.length >= 30) { error.value = '一餐最多记录 30 项食物。'; return }
-  items.value.push({ name: '手动添加的食物', estimated_grams: 100, food_code: '', rowId:++nextRowId, nutritionSource: 'catalog' })
+  if (busy.value || saving.value || items.value.length >= 30) return
+  items.value.push({ name: '手动记录', estimated_grams: 100, food_code: '', rowId: ++nextRowId, nutritionSource: 'catalog' })
+  if (!foods.value.length && !foodsLoading.value) void loadFoods()
 }
-function upload() { if (!busy.value && !saving.value) fileRef.value?.click() }
+function chooseFood(item: ScanItem, code: string) {
+  item.food_code = code
+  item.name = foodsByCode.value.get(code)?.name || '手动记录'
+}
+function pick(source: 'camera' | 'album') { if (!busy.value && !saving.value) (source === 'camera' ? cameraRef : albumRef).value?.click() }
 async function onFile(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]; input.value = ''
+  const input = event.target as HTMLInputElement, file = input.files?.[0]
+  input.value = ''
   if (!file || busy.value || saving.value) return
-  if (file.size > 5 * 1024 * 1024) { error.value = '这张照片超过 5MB，请选择小一点的照片。'; return }
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { error.value = '请选择 JPG、PNG 或 WebP 格式的照片。'; return }
+  if (file.size > 25 * 1024 * 1024) { error.value = '照片超过 25MB，请在相册中选择较小的照片。'; return }
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) && !(file.type === '' && /\.(jpe?g|png|webp)$/i.test(file.name))) { error.value = '请使用 JPG、PNG 或 WebP 照片；HEIC 照片请先转为 JPG。'; return }
+  if (items.value.length && !window.confirm('更换照片会清除这一餐尚未保存的食物，确定更换吗？')) return
   if (preview.value) URL.revokeObjectURL(preview.value)
-  preview.value = URL.createObjectURL(file)
-  imageId.value = ''
-  recognitionId.value = ''
-  items.value = []
+  selectedFile = file; uploadFile = null; preview.value = URL.createObjectURL(file); viewingPhoto.value = false
+  imageId.value = ''; recognitionId.value = ''; items.value = []; saved.value = false
+  await recognize()
+}
+async function prepareUpload(file: File): Promise<File> {
+  const image = new Image()
+  const loaded = new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('无法打开这张照片，请换一张 JPG、PNG 或 WebP 图片。'))
+  })
+  image.src = preview.value
+  await loaded
+  const scale = Math.min(1, 2048 / Math.max(image.naturalWidth, image.naturalHeight))
+  if (scale === 1 && file.size <= 5 * 1024 * 1024) return file
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('当前浏览器无法处理大照片，请选择 5MB 以内的图片。')
+  context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85))
+  if (!blob || blob.size > 5 * 1024 * 1024) throw new Error('照片处理失败，请选择较小的图片重试。')
+  return new File([blob], 'meal.jpg', { type: 'image/jpeg' })
+}
+async function recognize() {
+  if (!selectedFile || busy.value || saving.value) return
+  if (items.value.length && !window.confirm('重新识别会替换当前食物和已调整的分量，继续吗？')) return
   busy.value = true; error.value = ''; notice.value = ''
   try {
-    const form = new FormData(); form.append('file', file)
-    const result = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: uploadRequest.signal })
-    imageId.value = result.id
-    const recognized = await api<{ items: Recognized[]; recognition_id: string; notice: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: result.id }), signal: uploadRequest.signal })
-    // A catalog update can add a valid code while this page is already open.
-    // Refresh once before binding, so a correct server match is not invisible.
-    if (recognized.items.some(item=>item.food_code && !foodsByCode.value.has(item.food_code))) await loadFoods()
-    recognitionId.value = recognized.recognition_id
-    items.value = recognized.items.map((item, index) => ({ ...item, rowId:++nextRowId, food_code: item.food_code || '', originalFoodCode: item.food_code || '', manualSelection: false,
-      recognitionIndex: index, nutritionSource: item.nutrition ? 'model' : 'catalog',
-      match_status: item.match_status || (item.food_code ? 'matched' : 'no_evidence') }))
-    const count=items.value.filter(item=>item.food_code).length
-    notice.value = `已匹配 ${count}/${items.value.length} 项${recognized.elapsed_ms ? ` · 用时 ${(recognized.elapsed_ms/1000).toFixed(1)} 秒` : ''}。` + recognized.notice
+    if (!imageId.value) {
+      stage.value = '正在准备照片…'
+      uploadFile ||= await prepareUpload(selectedFile)
+      if (disposed) return
+      stage.value = '正在上传照片…'
+      const form = new FormData(); form.append('file', uploadFile)
+      const uploaded = await api<{ id: string }>('/images', { method: 'POST', body: form, signal: request.signal })
+      imageId.value = uploaded.id
+    }
+    stage.value = 'AI 正在识别食物与营养…'
+    const result = await api<{ items: Recognized[]; recognition_id: string; elapsed_ms?: number }>('/meals/recognize', { method: 'POST', body: jsonBody({ image_id: imageId.value }), signal: request.signal })
+    recognitionId.value = result.recognition_id
+    items.value = result.items.map((item, index) => ({ ...item, food_code: null, rowId: ++nextRowId, recognitionIndex: index, nutritionSource: 'model' }))
+    notice.value = result.items.length ? `AI 已识别 ${result.items.length} 项食物${result.elapsed_ms ? ` · ${(result.elapsed_ms / 1000).toFixed(1)} 秒` : ''}，请确认分量。` : '这张照片没有识别出食物，请换一张清晰的餐图，或手动记餐。'
   } catch (failure) {
-    if (!uploadRequest.signal.aborted) error.value = failure instanceof Error ? failure.message : '照片识别失败，请重试或手动添加食物。'
+    if (!disposed) error.value = failure instanceof Error ? failure.message : '识别失败，请重试。'
   } finally { busy.value = false }
 }
 async function save() {
-  if (saving.value || busy.value) return
-  if (!complete.value) { error.value = '请确认每项重量与营养数据；没有模型估算的项目可选择食品库参考。'; return }
+  if (saving.value || busy.value || !complete.value) return
   saving.value = true; error.value = ''
   try {
     await api('/meals', { method: 'POST', body: jsonBody({ meal_type: mealType.value, eaten_at: new Date().toISOString(), image_id: imageId.value || null, recognition_id: recognitionId.value || null,
-      items: items.value.map(item => ({ food_code: item.food_code || null, grams: item.estimated_grams, nutrition_source: item.nutritionSource, recognition_index: item.recognitionIndex })) }) })
-    if (!disposed) emit('go', 'history')
-  } catch (failure) { error.value = failure instanceof Error ? failure.message : '保存失败，请稍后重试' }
+      items: items.value.map(item => ({ food_code: item.nutritionSource === 'model' ? null : item.food_code || null, grams: item.estimated_grams, nutrition_source: item.nutritionSource, recognition_index: item.recognitionIndex })) }), signal: request.signal })
+    if (disposed) return
+    items.value = []; imageId.value = ''; recognitionId.value = ''; selectedFile = null; uploadFile = null
+    if (preview.value) URL.revokeObjectURL(preview.value)
+    preview.value = ''; notice.value = ''; saved.value = true
+    emit('go', 'history')
+  } catch (failure) { if (!disposed) error.value = failure instanceof Error ? failure.message : '保存失败，请稍后重试。' }
   finally { saving.value = false }
 }
 </script>
 
 <template>
   <section class="page scan-page">
-    <header class="page-header"><div class="eyebrow">CAPTURE YOUR MEAL</div><h1 class="page-title">好好吃饭，从这一餐开始。</h1><p class="page-subtitle">拍下餐盘，认识食物。确认一下分量，就能留下一份饮食日记。</p></header>
-    <button type="button" class="upload-card" :class="{ filled: preview }" :disabled="busy || saving" @click="upload" :aria-label="preview ? '重新选择餐食照片' : '拍照或从相册选择食物照片'">
-      <img v-if="preview" :src="preview" alt="餐食预览" />
-      <template v-else><span class="upload-circle"><Camera :size="32" /></span><h3>拍下你的美味</h3><p>拍照或从相册选择 · 5MB 以内</p></template>
-      <span class="upload-action">{{ preview ? '重新选择照片' : '选择餐食照片' }}<ArrowRight :size="16" /></span>
-    </button>
-    <input ref="fileRef" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="onFile" />
-    <div v-if="busy" class="notice scan-progress" role="status"><LoaderCircle :size="19" class="spinning" /><span>正在认识盘中的食物…<small>分量是初步估算，稍后可以自己调整</small></span></div>
-    <p v-if="notice" class="notice" role="status">{{ notice }}</p><p v-if="error" class="error" role="alert">{{ error }}</p>
-    <div v-if="foodsError" class="error food-load-error" role="alert"><span>{{ foodsError }}</span><button type="button" class="text-action" @click="loadFoods"><RefreshCw :size="16" />重试</button></div>
-    <div class="section-header"><div><h2>{{ items.length ? '确认食物与分量' : '这一餐吃了什么' }}</h2><p class="section-copy">估算会有偏差，你可以随时调整</p></div><button type="button" class="text-action" @click="add" :disabled="busy || saving || items.length >= 30"><Plus :size="17" />手动添加</button></div>
-    <div v-if="!items.length && !busy" class="empty-state scan-empty"><Utensils :size="28" /><strong>记录自己的饮食节奏</strong><p>拍照后，食物会出现在这里。<br />也可以直接手动添加。</p></div>
+    <header class="page-header"><div class="eyebrow">CAPTURE YOUR MEAL</div><h1 class="page-title">好好吃饭，从这一餐开始。</h1><p class="page-subtitle">拍下餐盘，AI 识别食物与营养，确认分量后保存。</p></header>
+    <button v-if="preview" type="button" class="upload-card filled photo-preview" @click="viewingPhoto = true" aria-label="查看餐食原图"><img :src="preview" alt="已选择的餐食照片" /><span class="upload-action"><Expand :size="16" />查看原图</span></button>
+    <div v-else class="upload-card photo-empty"><span class="upload-circle"><Camera :size="32" /></span><h3>拍下你的美味</h3><p>JPG、PNG、WebP · 最大 25MB，大照片自动压缩上传</p></div>
+    <div class="photo-actions"><button type="button" :disabled="busy || saving" @click="pick('camera')"><Camera :size="19" />{{ preview ? '重新拍照' : '拍照' }}</button><button type="button" :disabled="busy || saving" @click="pick('album')"><Images :size="19" />{{ preview ? '更换照片' : '从相册选择' }}</button></div>
+    <input ref="cameraRef" class="hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" aria-label="拍摄餐食照片" @change="onFile" />
+    <input ref="albumRef" class="hidden" type="file" accept="image/jpeg,image/png,image/webp" aria-label="从相册选择餐食照片" @change="onFile" />
+    <div v-if="busy" class="notice scan-progress" role="status"><LoaderCircle :size="19" class="spinning" /><span>{{ stage }}<small>通常需要几秒，请稍候；可以先查看原图</small></span></div>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+    <div v-if="error" class="error" role="alert">{{ error }}</div>
+    <button v-if="preview && !busy" type="button" class="text-action retry-recognition" :disabled="saving" @click="recognize"><RefreshCw :size="16" />{{ error || !items.length ? '重试识别' : '重新识别这张照片' }}</button>
+    <p v-if="saved && !preview && !items.length" class="notice success" role="status">上一餐已保存，可以开始记录新的一餐。</p>
+    <div class="section-header"><div><h2>{{ items.length ? '确认食物与分量' : '这一餐吃了什么' }}</h2><p class="section-copy">{{ items.length ? '以 AI 识别为依据，修改重量会同步更新营养' : '拍照识别，也可以单独手动记餐' }}</p></div><button type="button" class="text-action" @click="add" :disabled="busy || saving || items.length >= 30"><Plus :size="17" />手动记餐</button></div>
+    <div v-if="!items.length && !busy" class="empty-state scan-empty"><Utensils :size="28" /><strong>{{ preview ? '暂时没有可保存的食物' : '记录自己的饮食节奏' }}</strong><p>{{ preview ? '重试识别、换张照片，或手动记餐。' : '拍照或选择相册照片，食物会出现在这里。' }}</p></div>
     <article v-for="(item, index) in items" :key="item.rowId" class="food-item">
-      <div class="food-head"><div><span class="food-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ item.name }}</strong></div><button type="button" class="icon-button" :aria-label="'删除' + item.name" :disabled="saving" @click="items.splice(index, 1)"><Trash2 :size="18" /></button></div>
-      <div v-if="hasMatchingInfo(item)" class="matching-info" aria-live="polite">
-        <template v-if="selectedFood(item)">
-          <span class="matching-tag"><Check :size="14" aria-hidden="true" />{{ matchingLabel(item) }}</span>
-          <p v-if="usesLegacyReference(item)" class="matching-reference">这条参考记录只标注了“熟”，没有具体做法，请确认是否适合这一餐。</p>
-        </template>
-        <template v-else>
-          <p class="matching-reason">{{ item.nutrition ? '未确认食品库对应项，可直接按照片 AI 估算保存。' : matchingReason(item) }}</p>
-          <p v-if="item.preparation" class="matching-preparation">照片参考做法：{{ item.preparation }}</p>
-          <div v-if="relevantCandidates(item).length" class="matching-candidates">
-            <span class="matching-candidates-label">可能相近的食物 · 可选关联食品库</span>
-            <button v-for="food in relevantCandidates(item)" :key="food.code" type="button" class="candidate-button" :disabled="saving || foodsLoading" :aria-label="'选择食品库食物：' + food.name + '，' + (food.preparation || '做法未注明')" @click="chooseFood(item, food.code)">
-              <span><strong>{{ food.name }}</strong><small>{{ food.preparation || '做法未注明' }}</small></span><ArrowRight :size="16" aria-hidden="true" />
-            </button>
-          </div>
-        </template>
-      </div>
-      <FoodPicker :model-value="item.food_code" :foods="foods" :optional="!!item.nutrition" :initial-query="!item.food_code && hasMatchingInfo(item) ? item.name : ''" :disabled="saving || foodsLoading" @update:model-value="value => chooseFood(item, value)" />
-      <div v-if="item.nutrition" class="nutrition-choice">
-        <span>营养计算依据</span>
-        <div><button type="button" :class="{ active: item.nutritionSource === 'model' }" :disabled="saving" :aria-pressed="item.nutritionSource === 'model'" @click="item.nutritionSource = 'model'">照片 AI 估算</button><button type="button" :class="{ active: item.nutritionSource === 'catalog' }" :disabled="saving || !selectedFood(item)" :aria-pressed="item.nutritionSource === 'catalog'" @click="item.nutritionSource = 'catalog'">食品库参考</button></div>
-        <small>{{ item.nutritionSource === 'model' ? '未匹配食品库也可保存；关联食物不会覆盖照片估算。' : '已改用所选食品库的每 100 克营养值。' }}</small>
-      </div>
-      <div class="weight-row"><label>估计重量（克）<input type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="5" inputmode="decimal" :disabled="saving" :aria-invalid="!validWeight(item)" /></label><div class="item-calories"><span>这份食物</span><strong>{{ itemEnergy(item) === null ? '—' : energyText(itemEnergy(item) || 0) }}<small> kcal</small></strong></div></div>
-      <p class="food-energy" :class="{ pending: itemEnergy(item) === null }" aria-live="polite">
-        <template v-if="!validWeight(item)">重量请填写 5～3000 克。</template>
-        <template v-else-if="!nutritionReference(item)">暂未获得模型营养估算，请重新识别或选择食品库参考。</template>
-        <template v-else>{{ nutritionReference(item)?.kcal }} kcal/100g × {{ item.estimated_grams }}g ÷ 100</template>
-      </p>
-      <p v-if="nutritionReference(item)" class="food-source">{{ item.nutritionSource === 'model' ? '照片 AI 估算 · 未核验' : selectedFood(item)?.source_type === 'ai_estimate' ? '食品库 AI 估算 · 未核验' : '食品库参考数据' }} · 每 100 克可食部<span v-if="item.nutritionSource === 'model' ? item.preparation : selectedFood(item)?.preparation"> · {{ item.nutritionSource === 'model' ? item.preparation : selectedFood(item)?.preparation }}</span></p>
+      <div class="food-head"><div><span class="food-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ item.name }}</strong></div><button type="button" class="icon-button" :aria-label="'删除' + item.name" :disabled="saving || busy" @click="items.splice(index, 1)"><Trash2 :size="18" /></button></div>
+      <template v-if="item.nutritionSource === 'catalog'"><FoodPicker :model-value="item.food_code || ''" :foods="foods" :disabled="saving || busy || foodsLoading" @update:model-value="value => chooseFood(item, value)" /><p v-if="foodsError" class="error">{{ foodsError }}<button type="button" class="text-action" @click="loadFoods">重试加载</button></p></template>
+      <p v-else class="ai-source">AI 识别 · 营养估算<span v-if="item.preparation"> · {{ item.preparation }}</span></p>
+      <div class="weight-row"><label :for="'weight-' + item.rowId">{{ item.nutritionSource === 'model' ? '确认重量（克）' : '食物重量（克）' }}<input :id="'weight-' + item.rowId" type="number" v-model.number="item.estimated_grams" min="5" max="3000" step="any" inputmode="decimal" :disabled="saving || busy" :aria-invalid="!validWeight(item)" :aria-describedby="'weight-help-' + item.rowId" /></label><div class="item-calories"><span>这份食物</span><strong>{{ display(amount(item, 'kcal')) }}<small> kcal</small></strong></div></div>
+      <p :id="'weight-help-' + item.rowId" class="food-energy" :class="{ pending: amount(item, 'kcal') === null }"><template v-if="!validWeight(item)">请填写 5～3000 克，不能留空。</template><template v-else-if="!reference(item)">{{ item.nutritionSource === 'model' ? 'AI 未返回这项营养数据，请重试识别或删除此项后保存。' : '请选择手动记录的食物。' }}</template><template v-else>{{ reference(item)?.kcal }} kcal / 100 克 · 按确认重量换算</template></p>
+      <div v-if="reference(item)" class="item-macros"><span>蛋白质 <b>{{ display(amount(item, 'protein')) }}</b> g</span><span>碳水 <b>{{ display(amount(item, 'carbs')) }}</b> g</span><span>脂肪 <b>{{ display(amount(item, 'fat')) }}</b> g</span></div>
     </article>
     <div v-if="items.length" class="result-bottom">
-      <label class="form-label">记在哪一餐<select v-model="mealType" :disabled="saving"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select></label>
-      <div class="sum-line" aria-live="polite"><span>{{ !complete ? '已估算食物小计' : '本餐估算能量' }}</span><strong>{{ energyText(total) }} <small>kcal</small></strong></div>
-      <p class="energy-rule">优先使用照片 AI 返回的重量与每 100 克营养，未匹配食品库也能保存。修改重量后按比例更新；也可主动切换为食品库参考。</p>
-      <p v-if="!complete" class="energy-warning" role="status">已计入 {{ calculatedCount }}/{{ items.length }} 项。请检查重量；缺少模型估算的项目可重新识别或选择食品库参考。</p>
-      <button type="button" class="primary-button" @click="save" :disabled="saving || busy || !complete"><Check :size="19" />{{ saving ? '正在保存这一餐…' : '保存这一餐' }}</button>
+      <label class="form-label">记在哪一餐<select v-model="mealType" :disabled="saving || busy"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select></label>
+      <div class="sum-line" aria-live="polite"><span>{{ complete ? '本餐估算能量' : '已计算食物小计' }}</span><strong>{{ display(totals.kcal) }} <small>kcal</small></strong></div>
+      <div class="item-macros total-macros"><span>蛋白质 <b>{{ display(totals.protein) }}</b> g</span><span>碳水 <b>{{ display(totals.carbs) }}</b> g</span><span>脂肪 <b>{{ display(totals.fat) }}</b> g</span></div>
+      <p v-if="!complete" class="energy-warning" role="status">已计入 {{ calculatedCount }}/{{ items.length }} 项，请检查上方重量和营养数据。缺少数据的项目不会按 0 保存。</p>
+      <button type="button" class="primary-button" @click="save" :disabled="saving || busy || !complete"><LoaderCircle v-if="saving" :size="19" class="spinning" /><Check v-else :size="19" />{{ saving ? '正在保存这一餐…' : '确认并保存这一餐' }}</button>
     </div>
-    <p class="microcopy">照片与食品库中的 AI 估算均未经实验核验。配料、烹调方式和用油会影响实际营养。</p>
+    <p class="microcopy">AI 识别和营养数据为估算，未经实验核验。请确认食物、做法和实际分量。</p>
+    <ImageViewer v-if="viewingPhoto && preview" :src="preview" title="餐食原图" @close="viewingPhoto = false" />
   </section>
 </template>
 
 <style scoped>
-.nutrition-choice{display:grid;gap:8px;margin-top:16px;color:#5e7565;font-size:13px}.nutrition-choice>div{display:flex;gap:8px}.nutrition-choice button{flex:1;min-height:44px;border:1px solid #dfe8df;border-radius:11px;background:#fafcf9;color:#5e7565;font:inherit}.nutrition-choice button.active{background:#eaf3ec;border-color:#76a68a;color:#245b43;font-weight:600}.nutrition-choice button:disabled{opacity:.5}.nutrition-choice small{font-size:12px;line-height:1.7;color:#7b8d81}
-.upload-card{width:100%;font:inherit;color:inherit;padding:0}.upload-card:disabled{opacity:1}.section-copy{margin:5px 0 0;font-size:12px;line-height:1.5;color:#7b8d81}.scan-empty{display:flex;flex-direction:column;align-items:center;gap:12px;background:white;border:1px solid #e5ebe5;padding:28px 18px}.scan-empty>svg{color:#8eac8c}.scan-empty strong{font-size:16px;color:#496b50}.scan-empty p{margin:0;font-size:14px;line-height:1.8;color:#7b8e80}.scan-progress small{display:block;font-size:12px;color:#7b8e80;margin-top:3px}.scan-progress>svg{flex-shrink:0}.food-head>div{display:flex;align-items:center;gap:9px;min-width:0}.food-head strong{overflow-wrap:anywhere}.food-index{font-size:12px;color:#839a85;border-radius:8px;background:#f0f5ed;padding:5px 7px;font-weight:600}.food-head .icon-button{min-width:44px;min-height:44px;flex-shrink:0}.food-energy{font-size:12px;line-height:1.7;color:#6d8773;margin:10px 0 0;overflow-wrap:anywhere}.food-energy.pending{color:#9e713f}.energy-rule{font-size:12px;line-height:1.8;color:#77897d;margin:0 0 16px}.energy-warning{font-size:13px;line-height:1.8;color:#8c622d;background:#fff5e9;border-radius:13px;padding:12px 14px;margin:0 0 16px}.weight-row{margin-top:16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:end}.weight-row label{display:grid;gap:8px;font-size:13px;font-weight:500;color:#5e7565}.weight-row input{width:100%;min-width:0;box-sizing:border-box;border:1px solid #dfe8df;border-radius:12px;padding:11px 12px;color:#304e3a;background:#fafcf9;font-size:16px;min-height:48px}.weight-row input[aria-invalid=true]{border-color:#d9ad7a}.item-calories{padding:0 5px 8px;text-align:right}.item-calories>span{display:block;font-size:12px;color:#8a9a8e;margin-bottom:7px}.item-calories strong{font-size:23px;font-weight:700;color:#245b43;letter-spacing:-.5px}.item-calories small{font-size:12px;color:#819487;letter-spacing:0;font-weight:400}.food-source{font-size:11px;line-height:1.8;color:#8d805b;margin:5px 0 0}.result-bottom{background:white;border:1px solid #e5ebe5;border-radius:22px;padding:20px}.food-load-error{display:flex;gap:8px;align-items:center;justify-content:space-between}.food-load-error .text-action{min-width:60px;min-height:44px}.sum-line{margin:19px 0 12px}.scan-page .text-action{min-height:44px;padding:4px 0;flex-shrink:0;font-size:13px}.scan-page .section-header{align-items:center}
-.matching-info{margin:-2px 0 16px}.matching-tag{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:9px;background:#edf5ee;color:#32644a;font-size:12px;font-weight:500}.matching-reference,.matching-reason{margin:9px 0 0;padding:11px 13px;border:1px solid #f0e3cf;border-radius:12px;background:#fff9ef;color:#88683e;font-size:13px;line-height:1.75;overflow-wrap:anywhere}.matching-reason{margin:0}.matching-preparation{margin:7px 0 0;color:#7b8d81;font-size:12px;line-height:1.6}.matching-candidates{display:grid;gap:7px;margin-top:12px}.matching-candidates-label{font-size:12px;color:#7b8d81;line-height:1.6}.candidate-button{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:48px;padding:10px 12px;border:1px solid #dfe8df;border-radius:12px;background:#fafcf9;color:#315b42;text-align:left;cursor:pointer;font:inherit}.candidate-button>span{display:grid;gap:3px;min-width:0}.candidate-button strong{font-size:13px;font-weight:500;line-height:1.5;overflow-wrap:anywhere}.candidate-button small{font-size:11px;line-height:1.5;color:#7b8d81}.candidate-button>svg{flex-shrink:0;color:#819c87}.candidate-button:hover{border-color:#9abb9d;background:#f1f7ee}.candidate-button:focus-visible{outline:2px solid #72a37b;outline-offset:2px}.candidate-button:disabled{opacity:.55;cursor:default}
+.photo-empty{cursor:default}.photo-empty p{margin-bottom:0}.photo-preview{width:100%;padding:0;font:inherit}.photo-preview img{object-fit:contain}.photo-actions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0 18px}.photo-actions button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;border:1px solid #d9e5d9;border-radius:14px;background:white;color:#285f46;font-size:14px;font-weight:600}.photo-actions button:first-child{background:#e9f2e5}.section-copy{margin:5px 0 0;font-size:12px;line-height:1.7;color:#7b8d81}.section-header{align-items:center;gap:12px}.scan-page .text-action{min-height:44px;padding-left:0}.retry-recognition{margin-bottom:6px}.scan-empty{display:flex;flex-direction:column;align-items:center;gap:12px}.scan-empty p{margin:0}.scan-progress>svg{flex-shrink:0}.scan-progress small{display:block;font-size:12px;margin-top:3px}.food-head>div{display:flex;align-items:center;gap:9px;min-width:0}.food-head strong{overflow-wrap:anywhere}.food-index{font-size:12px;color:#839a85;background:#f0f5ed;padding:5px 7px;border-radius:8px}.food-head .icon-button{min-width:44px;min-height:44px;flex-shrink:0}.ai-source{font-size:12px;color:#72866e;line-height:1.7;margin:-4px 0 14px}.weight-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:end;margin-top:14px}.weight-row label{display:grid;gap:8px;font-size:13px;color:#5e7565}.weight-row input{width:100%;min-width:0;min-height:48px;border:1px solid #dfe8df;border-radius:12px;padding:11px 12px;color:#304e3a;background:#fafcf9}.weight-row input[aria-invalid=true]{border-color:#ce875d}.item-calories{text-align:right;padding-bottom:8px}.item-calories>span{display:block;font-size:12px;color:#8a9a8e;margin-bottom:7px}.item-calories strong{font-size:23px;color:#245b43}.item-calories small{font-size:12px;color:#819487;font-weight:400}.food-energy{font-size:12px;line-height:1.7;color:#7b8d81;margin:10px 0}.food-energy.pending{color:#9e713f}.item-macros{display:flex;flex-wrap:wrap;gap:8px 15px;font-size:12px;color:#72836e;line-height:1.8}.item-macros b{font-weight:600;color:#496c4f}.total-macros{margin-bottom:20px}.result-bottom{padding:20px;border-radius:22px;border:1px solid #e5ebe5;background:white}.sum-line{margin:18px 0 12px}.energy-warning{font-size:13px;line-height:1.8;color:#8c622d;background:#fff5e9;padding:12px;border-radius:12px;margin:0 0 16px}
 </style>

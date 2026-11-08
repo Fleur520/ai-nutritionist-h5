@@ -37,6 +37,20 @@ VLLM_VISION_MAX_TOKENS=1536
 仅有上述视觉配置时不要宣称文字咨询或报告也已接通。
 报告无独立服务时设置 `APP_REPORTS_ENABLED=false`、前端构建 `VITE_REPORTS_ENABLED=false`。
 
+同一百炼业务空间也可提供文字咨询，需单独设置：
+
+```dotenv
+VLLM_CHAT_COMPLETIONS_URL=https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+VLLM_MODEL=qwen3.7-flash
+VLLM_API_STYLE=bailian
+VLLM_API_KEY=
+VLLM_MAX_TOKENS=1536
+```
+
+文字 Key 同样只保存在服务器配置或受限 HTTP 机密中。可以使用允许同一模型的视觉 Key，
+但不可把 Key 发送到前端。百炼文字请求显式关闭思考；超出输出限制或中断的回复会提示重试，
+不会把部分内容当成完整回答保存。报告仍需独立服务。
+
 修改后重启 API。云环境须在官方网络设置中允许实际工作空间 API 主机；
 出站域名放行不等于已配置密钥。不要修改原服务器的数据库、图片目录和其他服务配置。
 

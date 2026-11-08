@@ -50,6 +50,9 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
     messages.append({'role': 'user', 'content': message})
     payload = {'model': s.vllm_model, 'messages': messages, 'stream': True,
                'temperature': 0.5, 'max_tokens': s.vllm_max_tokens}
+    if getattr(s, 'vllm_api_style', 'vllm') == 'bailian':
+        payload['enable_thinking'] = False
+    finished = False
     async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=8, read=160)) as client:
         async with client.stream('POST', s.vllm_chat_completions_url, json=payload,
                                  headers=_auth_headers(s.vllm_api_key)) as resp:
@@ -59,6 +62,8 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
                     continue
                 value = line[5:].strip()
                 if value == '[DONE]':
+                    if not finished:
+                        raise ValueError('model stream ended without a complete reply')
                     return
                 if not value:
                     continue
@@ -66,11 +71,21 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
                     event = json.loads(value)
                     if event.get('error'):
                         raise ValueError('model stream error')
-                    delta = event.get('choices', [{}])[0].get('delta', {}).get('content')
+                    choices = event.get('choices') or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get('finish_reason') == 'length':
+                        raise ValueError('model output truncated')
+                    if choice.get('finish_reason') == 'stop':
+                        finished = True
+                    delta = choice.get('delta', {}).get('content')
                     if isinstance(delta, str) and delta:
                         yield delta
                 except (KeyError, TypeError, IndexError, json.JSONDecodeError) as exc:
                     log.warning('Unexpected vLLM stream frame: %s', type(exc).__name__)
+    if not finished:
+        raise ValueError('model stream interrupted')
 
 
 async def recognize_image(path: Path, mime: str) -> list[dict]:

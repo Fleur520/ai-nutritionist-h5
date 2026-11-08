@@ -34,17 +34,24 @@ function readableError(data:unknown,status:number):string {
   return '请求没有完成，请检查填写内容后重试'
 }
 async function responseError(response:Response){return new Error(readableError(await response.json().catch(()=>null),response.status))}
+async function requestFetch(path:string,init:RequestInit):Promise<Response> {
+  try { return await fetch(path,init) }
+  catch (failure) {
+    if(init.signal?.aborted)throw failure
+    throw new Error('网络连接失败，请检查网络后重试')
+  }
+}
 export async function api<T>(path:string, init:RequestInit={}):Promise<T> {
   const headers=new Headers(init.headers)
   if(!(init.body instanceof FormData)&&!headers.has('Content-Type'))headers.set('Content-Type','application/json')
-  const response=await fetch('/api'+path,{credentials:'include',...init,headers})
+  const response=await requestFetch('/api'+path,{credentials:'include',...init,headers})
   if(!response.ok)throw await responseError(response)
   return response.json() as Promise<T>
 }
 export const jsonBody=(v:unknown)=>JSON.stringify(v)
 
 export async function streamMessage(message:string,threadId:string,onDelta:(s:string)=>void,signal?:AbortSignal):Promise<void> {
-  const response=await fetch('/api/chat/stream',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:jsonBody({message,thread_id:threadId}),signal})
+  const response=await requestFetch('/api/chat/stream',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:jsonBody({message,thread_id:threadId}),signal})
   if(!response.ok)throw await responseError(response)
   if(!response.body)throw new Error('浏览器不支持流式响应')
   const reader=response.body.getReader()

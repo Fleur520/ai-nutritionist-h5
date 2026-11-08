@@ -71,6 +71,11 @@ try {
     globalThis.fetch = async () => new Response('unavailable', { status: 503 })
     await assert.rejects(api('/profile'), /服务暂时没有响应/)
   })
+  await check('network failures have readable guidance', async () => {
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch') }
+    await assert.rejects(api('/profile'), /网络连接失败/)
+    await assert.rejects(streamMessage('test', 'test', () => {}), /网络连接失败/)
+  })
   console.log(`${fixtures.length} API and streaming checks passed`)
 } finally {
   globalThis.fetch = originalFetch

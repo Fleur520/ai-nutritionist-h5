@@ -46,12 +46,12 @@ function go(value:string){tab.value=value;window.scrollTo({top:0,behavior:'insta
     <template v-else>
       <header class="app-header"><button class="brand" aria-label="食光首页" @click="go('home')"><span class="brand-mark"><Sparkles :size="21"/></span><span class="brand-copy"><strong>食光</strong><span>AI NUTRITION</span></span></button><div class="header-tip"><Leaf :size="13"/> 好好吃饭，慢慢变好</div></header>
       <main class="view-body" id="main-content">
+        <KeepAlive><ScanPage v-if="tab==='scan'" @go="go"/></KeepAlive>
         <HomePage v-if="tab==='home'" @go="go"/>
-        <ScanPage v-else-if="tab==='scan'" @go="go"/>
         <ChatPage v-else-if="tab==='chat'"/>
         <HistoryPage v-else-if="tab==='history'" @go="go"/>
         <ReportPage v-else-if="reportsEnabled && tab==='report'" @go="go"/>
-        <ProfilePage v-else @logout="user=null;tab='home'"/>
+        <ProfilePage v-else-if="tab==='profile'" @logout="user=null;tab='home'"/>
       </main>
       <nav class="tabbar" aria-label="底部导航">
         <button v-for="item in tabs" :key="item.id" type="button" class="tab" :class="{selected:tab===item.id}" :aria-current="tab===item.id?'page':undefined" @click="go(item.id)">
