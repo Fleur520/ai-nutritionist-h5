@@ -29,6 +29,9 @@ Render 服务与 TiDB Free 实例都不启用付费套餐、不增加信用卡�
    本地文件仅为识别缓存，丢失时可恢复；图片仍验证登录和所有权，不公开成静态文件。
 6. 前端由 FastAPI 同源提供，`APP_NGINX_ACCEL=false`。直接 SSE，不再依赖临时隧道。
    可选预填账号通过明确的 VITE_DEFAULT_LOGIN_* 构建参数提供；只用于公开的共享体验账号。
+   若以 `andy` 登录现有体验账号，设置 `APP_LOGIN_ALIAS=andy`、
+   `APP_LOGIN_ALIAS_EMAIL=demo@shiguang.example`，以及前端 `VITE_DEFAULT_LOGIN_EMAIL=andy`。
+   别名仍验证原密码，沿用同一用户 ID 和记录；未配置时不启用别名，注册仍使用邮箱。
 7. 必须先合并到 main 且 `ci.yml` 通过。Render 的自动部署设为 After CI Checks Pass。
    候选镜像先只监听 loopback，通过 hosted_acceptance 后才绑定公开端口。
    失败退出，让平台保留上一正常部署；首次部署失败则不发布可用版本。
@@ -46,3 +49,4 @@ Render 服务与 TiDB Free 实例都不启用付费套餐、不增加信用卡�
 目标已有数据时必须先报告冲突，不能清空或覆盖。
 
 本次免费方案不使用现有 101.42.140.70 服务器，也不修改其现有网站和证书。
+

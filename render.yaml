@@ -28,6 +28,10 @@ services:
         value: false
       - key: APP_COOKIE_SECURE
         value: true
+      - key: APP_LOGIN_ALIAS
+        value: andy
+      - key: APP_LOGIN_ALIAS_EMAIL
+        value: demo@shiguang.example
       - key: APP_REPORTS_ENABLED
         value: false
       - key: VLLM_API_STYLE
@@ -53,6 +57,7 @@ services:
       - key: APP_REVISION
         value: hosted
       - key: VITE_DEFAULT_LOGIN_EMAIL
-        value: demo@shiguang.example
+        value: andy
       - key: VITE_DEFAULT_LOGIN_PASSWORD
         sync: false
+
