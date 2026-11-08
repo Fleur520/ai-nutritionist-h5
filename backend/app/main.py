@@ -20,28 +20,36 @@ from .ai import chat_chunks, recognize_image
 from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
 from .recognition_jobs import RecognitionBusy, RecognitionJobs
+from .chat_jobs import ChatJobs
+from .media_store import initialize_media, image_content, recognition_path
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
 from .db import INTEGRITY_ERRORS, connect, initialize
 from .food_catalog import catalog_rows, initialize_catalog, match_food
 from .schemas import ChatMessage, Credentials, MealCreate, ProfilePatch
+from .meal_estimates import (NUTRIENTS, initialize_estimates, save_recognition,
+                             recognition_for_meal, model_item)
 
 log=logging.getLogger('nutrition')
 settings=get_settings()
 AI_SEM=asyncio.Semaphore(max(1,settings.app_max_ai_concurrency))
 IMAGE_SEM=asyncio.Semaphore(settings.app_max_image_concurrency)
 RECOGNITION_JOBS=RecognitionJobs(settings.app_max_ai_concurrency)
+CHAT_JOBS=ChatJobs(settings.app_max_ai_concurrency)
 Image.MAX_IMAGE_PIXELS=16_000_000
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialize()
     await initialize_catalog()
+    await initialize_estimates()
+    await initialize_media(settings)
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
     try:
         yield
     finally:
+        await CHAT_JOBS.close()
         await RECOGNITION_JOBS.close()
 
 app=FastAPI(title='AI 营养师 API',version='0.1.0',lifespan=lifespan)
@@ -176,10 +184,18 @@ async def upload_image(file:UploadFile=File(...),user:str=Depends(current_user))
         if cancelled:
             out.unlink(missing_ok=True)
             raise asyncio.CancelledError()
-    async with connect() as db:
-        await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
-                         (image_id,user,str(out),'image/jpeg'))
-        await db.commit()
+    try:
+        async with connect() as db:
+            stored_path = 'db:' + image_id if settings.app_image_storage == 'database' else str(out)
+            await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
+                             (image_id,user,stored_path,'image/jpeg'))
+            if settings.app_image_storage == 'database':
+                content = await asyncio.to_thread(out.read_bytes)
+                await db.execute('INSERT INTO image_payloads(image_id,content) VALUES(?,?)', (image_id, content))
+            await db.commit()
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
     return {'id':image_id,'url':f'/api/images/{image_id}'}
 
 @app.get('/api/images/{image_id}')
@@ -188,6 +204,8 @@ async def read_image(image_id:str,user:str=Depends(current_user)):
         cur=await db.execute('SELECT path FROM images WHERE id=? AND user_id=?',(image_id,user))
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
+    if r['path'] == 'db:' + image_id:
+        return Response(await image_content(image_id), media_type='image/jpeg', headers={'Cache-Control':'private, no-store'})
     path=Path(r['path']).resolve()
     if not path.is_file() or path.parent != settings.app_media_dir.resolve(): raise HTTPException(404,'图片不存在')
     if getattr(settings,'app_nginx_accel',False):
@@ -221,10 +239,11 @@ async def recognize(body:dict,user:str=Depends(current_user)):
         cur=await db.execute('SELECT path,mime FROM images WHERE id=? AND user_id=?',(image_id,user))
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
+    path = await recognition_path(image_id, r['path'], settings)
     waiting=time.perf_counter()
     try:
         result,coalesced=await RECOGNITION_JOBS.run((user,image_id),
-            lambda:recognize_once(Path(r['path']),r['mime'],started))
+            lambda:recognize_once(path,r['mime'],started))
     except RecognitionBusy as exc:
         raise HTTPException(429,'AI 请求繁忙，请稍后再试') from exc
     recognized,use_workflow,job_timings=result
@@ -244,23 +263,38 @@ async def recognize(body:dict,user:str=Depends(current_user)):
             if item.get('food_code') not in valid_codes:
                 item['food_code']=match_food(item['name'],catalog)
     timings['matching']=round((time.perf_counter()-stage_started)*1000)
-    elapsed_ms=round((time.perf_counter()-started)*1000)
     source='bisheng' if use_workflow else 'demo' if settings.demo_mode else 'direct'
+    stage_started=time.perf_counter()
+    receipt=await save_recognition(user,image_id,items,{
+        'provider':source, 'workflow_id':settings.bisheng_recognition_workflow_id if use_workflow else None,
+        'app_revision':settings.app_revision, 'generated_at':datetime.now(timezone.utc).isoformat()})
+    timings['receipt']=round((time.perf_counter()-stage_started)*1000)
+    elapsed_ms=round((time.perf_counter()-started)*1000)
     log.info('food_recognition source=%s elapsed_ms=%d items=%d matched=%d coalesced=%s timings_ms=%s',source,elapsed_ms,len(items),sum(bool(x.get('food_code')) for x in items),coalesced,timings)
-    return {'items':items,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,'coalesced':coalesced,
-            'notice':'已按食品库复核匹配结果，请确认菜品与分量；食品库中的 AI 估算值未经实验核验，配料和用油会影响实际营养。'}
+    return {'items':items,'recognition_id':receipt,'source':source,'elapsed_ms':elapsed_ms,'timings_ms':timings,'coalesced':coalesced,
+            'notice':'优先使用照片模型的重量与营养估算，食品库匹配仅供参考；未匹配也可保存。AI 估算未经实验核验，请确认分量与做法。'}
 
 @app.post('/api/meals',status_code=201)
 async def add_meal(body:MealCreate,user:str=Depends(current_user)):
     meal_id=str(uuid.uuid4())
-    codes=[x.food_code for x in body.items]
+    codes={x.food_code for x in body.items if x.food_code}
     async with connect() as db:
         if body.image_id:
             row=await (await db.execute('SELECT 1 FROM images WHERE id=? AND user_id=?',(body.image_id,user))).fetchone()
             if not row: raise HTTPException(404,'图片不存在')
-        rows=await (await db.execute('SELECT * FROM foods WHERE code IN ('+','.join('?' for _ in set(codes))+')',tuple(set(codes)))).fetchall()
+        rows=await (await db.execute('SELECT * FROM foods WHERE code IN ('+','.join('?' for _ in codes)+')',tuple(codes))).fetchall() if codes else []
         by_code={r['code']:r for r in rows}
         if any(code not in by_code for code in codes): raise HTTPException(422,'请选择标准食物')
+        receipt=await recognition_for_meal(db,body,user)
+        prepared=[]
+        for item in body.items:
+            if item.nutrition_source == 'model':
+                original,estimate=model_item(item,receipt)
+                prepared.append((item,estimate,original))
+            else:
+                if not item.food_code or item.food_code not in by_code:
+                    raise HTTPException(422,'请选择食品库食物，或使用照片模型估算')
+                prepared.append((item,by_code[item.food_code],None))
         # Normalize time to UTC; reporting uses UTC dates in this MVP.
         eaten=body.eaten_at
         if eaten.tzinfo is None: raise HTTPException(422,'eaten_at 必须包含时区')
@@ -268,11 +302,18 @@ async def add_meal(body:MealCreate,user:str=Depends(current_user)):
         try:
             await db.execute('INSERT INTO meals(id,user_id,meal_type,eaten_at,image_id) VALUES(?,?,?,?,?)',
                              (meal_id,user,body.meal_type,eaten,body.image_id))
-            for item in body.items:
-                food=by_code[item.food_code]
-                vals=[round(food[k]*item.grams/100,2) for k in ('kcal','protein','fat','carbs')]
+            for item,food,original in prepared:
+                item_id=str(uuid.uuid4())
+                vals=[round(food[k]*item.grams/100,2) for k in NUTRIENTS]
                 await db.execute('INSERT INTO meal_items(id,meal_id,food_code,grams,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?,?,?)',
-                                 (str(uuid.uuid4()),meal_id,item.food_code,item.grams,*vals))
+                                 (item_id,meal_id,item.food_code or '',item.grams,*vals))
+                if original is not None:
+                    provenance={**receipt['provenance'],'recognition_id':body.recognition_id,
+                                'recognition_index':item.recognition_index,'original_grams':original['estimated_grams']}
+                    await db.execute('''INSERT INTO meal_item_estimates(meal_item_id,name,preparation,source_type,
+                        source_model,basis_g,verified,nutrition_json,provenance_json) VALUES(?,?,?,?,?,?,?,?,?)''',
+                        (item_id,original['name'],original.get('preparation',''),'ai_estimate',original.get('source_model',''),
+                         100,0,json.dumps(food),json.dumps(provenance)))
             await db.commit()
         except Exception:
             await db.rollback()
@@ -288,8 +329,16 @@ async def list_meals(day:date|None=None,user:str=Depends(current_user)):
         cur=await db.execute('SELECT * FROM meals WHERE user_id=? AND eaten_at>=? AND eaten_at<? ORDER BY eaten_at DESC',(user,day_begin,day_end))
         meals=[rowdict(r) for r in await cur.fetchall()]
         for meal in meals:
-            cur=await db.execute('SELECT i.*, f.name FROM meal_items i JOIN foods f ON f.code=i.food_code WHERE i.meal_id=?',(meal['id'],))
+            cur=await db.execute('''SELECT i.*, COALESCE(e.name,f.name,'未命名食物') AS name,
+                e.source_type,e.source_model,e.preparation,e.basis_g,e.verified,e.nutrition_json
+                FROM meal_items i LEFT JOIN foods f ON f.code=i.food_code
+                LEFT JOIN meal_item_estimates e ON e.meal_item_id=i.id WHERE i.meal_id=?''',(meal['id'],))
             meal['items']=[rowdict(r) for r in await cur.fetchall()]
+            for item in meal['items']:
+                item['food_code']=item['food_code'] or None
+                nutrition_json=item.pop('nutrition_json')
+                item['nutrition']=json.loads(nutrition_json) if nutrition_json else None
+                item['verified']=bool(item['verified'])
     return meals
 
 LOCAL_TZ = ZoneInfo('Asia/Shanghai')
@@ -363,13 +412,12 @@ async def get_report(report_id:str,user:str=Depends(current_user)):
     output['summary']=json.loads(output.pop('summary_json'))
     return output
 
-@app.post('/api/chat/stream')
-async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
+async def prepare_chat(body:ChatMessage,user:str):
     async with connect() as db:
         cur=await db.execute('SELECT * FROM profiles WHERE user_id=?',(user,))
         user_profile=rowdict(await cur.fetchone()) or {}
     if not settings.demo_mode and not settings.vllm_chat_completions_url:
-        raise HTTPException(503,'尚未配置 vLLM 模型接口')
+        raise HTTPException(503,'AI 咨询暂时不可用，请稍后再试')
     async with connect() as db:
         cur=await db.execute('SELECT role,content FROM chat_messages WHERE user_id=? AND thread_id=? ORDER BY created_at,id DESC LIMIT 12',(user,body.thread_id))
         conversation=[rowdict(r) for r in await cur.fetchall()]
@@ -386,6 +434,8 @@ async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
             async for text in chat_chunks(body.message,conversation,user_profile):
                 parts.append(text)
                 yield event('delta',{'content':text})
+            if not ''.join(parts).strip():
+                raise ValueError('empty model reply')
             async with connect() as db:
                 await db.execute('INSERT INTO chat_messages(id,user_id,thread_id,role,content) VALUES(?,?,?,?,?)',
                                  (str(uuid.uuid4()),user,body.thread_id,'assistant',''.join(parts)))
@@ -396,7 +446,31 @@ async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
             yield event('error',{'message':'咨询服务暂时不可用，请稍后再试'})
         finally:
             AI_SEM.release()
-    return StreamingResponse(generate(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+    return generate()
+
+@app.post('/api/chat/stream')
+async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
+    return StreamingResponse(await prepare_chat(body,user),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+@app.post('/api/chat/jobs',status_code=202)
+async def start_chat_job(body:ChatMessage,response:Response,user:str=Depends(current_user)):
+    if not settings.demo_mode and not settings.vllm_chat_completions_url:
+        raise HTTPException(503,'AI 咨询暂时不可用，请稍后再试')
+    async def source():
+        async for frame in await prepare_chat(body,user):
+            yield frame
+    response.headers['Cache-Control']='private, no-store'
+    return {'id':CHAT_JOBS.start(user,body.thread_id,source)}
+
+@app.get('/api/chat/jobs/{job_id}')
+async def read_chat_job(job_id:str,response:Response,after:int=0,user:str=Depends(current_user)):
+    response.headers['Cache-Control']='private, no-store'
+    return CHAT_JOBS.read(job_id,user,after)
+
+@app.delete('/api/chat/jobs/{job_id}')
+async def stop_chat_job(job_id:str,response:Response,user:str=Depends(current_user)):
+    response.headers['Cache-Control']='private, no-store'
+    return await CHAT_JOBS.stop(job_id,user)
 
 @app.get('/api/chat/history')
 async def history(thread_id:str,user:str=Depends(current_user)):
@@ -404,3 +478,9 @@ async def history(thread_id:str,user:str=Depends(current_user)):
     async with connect() as db:
         cur=await db.execute('SELECT role,content,created_at FROM chat_messages WHERE user_id=? AND thread_id=? ORDER BY created_at,id LIMIT 100',(user,thread_id))
         return [rowdict(r) for r in await cur.fetchall()]
+
+# A single container can serve the built H5 on a free web host. API routes above
+# take precedence; the original two-container deployment leaves this disabled.
+if settings.app_static_dir:
+    from fastapi.staticfiles import StaticFiles
+    app.mount('/', StaticFiles(directory=settings.app_static_dir, html=True), name='frontend')

@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: shiguang-nutrition
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: APP_DB_ENGINE
+        value: mysql
+      - key: APP_IMAGE_STORAGE
+        value: database
+      - key: MYSQL_SSL_ENABLED
+        value: true
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        value: 4000
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_DATABASE
+        value: nutrition_app
+      - key: DEMO_MODE
+        value: false
+      - key: APP_COOKIE_SECURE
+        value: true
+      - key: APP_REPORTS_ENABLED
+        value: false
+      - key: VLLM_API_STYLE
+        value: bailian
+      - key: VLLM_VISION_API_STYLE
+        value: bailian
+      - key: VLLM_MODEL
+        value: qwen3.7-flash
+      - key: VLLM_VISION_MODEL
+        value: qwen3.7-flash
+      - key: VLLM_MAX_TOKENS
+        value: 1536
+      - key: VLLM_VISION_MAX_TOKENS
+        value: 1536
+      - key: VLLM_CHAT_COMPLETIONS_URL
+        sync: false
+      - key: VLLM_VISION_URL
+        sync: false
+      - key: VLLM_API_KEY
+        sync: false
+      - key: VLLM_VISION_API_KEY
+        sync: false
+      - key: APP_REVISION
+        value: hosted
+      - key: VITE_DEFAULT_LOGIN_EMAIL
+        value: demo@shiguang.example
+      - key: VITE_DEFAULT_LOGIN_PASSWORD
+        sync: false

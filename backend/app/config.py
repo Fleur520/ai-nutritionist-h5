@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     mysql_password: str = ''
     mysql_database: str = 'ai_nutritionist'
     mysql_connect_timeout: int = Field(10, ge=1, le=60)
+    mysql_ssl_enabled: bool = False
+    mysql_ssl_ca: str = ''
     app_media_dir: Path = Path('./data/media')
+    app_image_storage: Literal['filesystem', 'database'] = 'filesystem'
+    app_static_dir: str = ''
     app_nginx_accel: bool = False
     app_max_ai_concurrency: int = 10
     app_max_image_concurrency: int = Field(4, ge=1, le=32)
@@ -38,11 +42,14 @@ class Settings(BaseSettings):
     bisheng_report_input_key: str = 'report_context'
     vllm_chat_completions_url: str = ''
     vllm_api_key: str = ''
+    vllm_api_style: Literal['vllm', 'bailian'] = 'vllm'
     vllm_model: str = 'Qwen3.5-27B-FP8'
     vllm_max_tokens: int = 768
     vllm_vision_url: str = ''
     vllm_vision_model: str = ''
     vllm_vision_api_key: str = ''
+    # Bailian accepts enable_thinking at the request top level; vLLM nests it.
+    vllm_vision_api_style: Literal['vllm', 'bailian'] = 'vllm'
     vllm_vision_max_tokens: int = Field(1536, ge=128, le=16384)
     vllm_vision_enable_thinking: bool = False
 

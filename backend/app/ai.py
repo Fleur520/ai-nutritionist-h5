@@ -13,6 +13,7 @@ import httpx
 from fastapi import HTTPException
 
 from .config import get_settings
+from .meal_estimates import nutrition_estimate
 
 log = logging.getLogger(__name__)
 DEMO_FOODS = [
@@ -49,6 +50,9 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
     messages.append({'role': 'user', 'content': message})
     payload = {'model': s.vllm_model, 'messages': messages, 'stream': True,
                'temperature': 0.5, 'max_tokens': s.vllm_max_tokens}
+    if getattr(s, 'vllm_api_style', 'vllm') == 'bailian':
+        payload['enable_thinking'] = False
+    finished = False
     async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=8, read=160)) as client:
         async with client.stream('POST', s.vllm_chat_completions_url, json=payload,
                                  headers=_auth_headers(s.vllm_api_key)) as resp:
@@ -58,6 +62,8 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
                     continue
                 value = line[5:].strip()
                 if value == '[DONE]':
+                    if not finished:
+                        raise ValueError('model stream ended without a complete reply')
                     return
                 if not value:
                     continue
@@ -65,11 +71,21 @@ async def chat_chunks(message: str, history: list[dict], profile: dict) -> Async
                     event = json.loads(value)
                     if event.get('error'):
                         raise ValueError('model stream error')
-                    delta = event.get('choices', [{}])[0].get('delta', {}).get('content')
+                    choices = event.get('choices') or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get('finish_reason') == 'length':
+                        raise ValueError('model output truncated')
+                    if choice.get('finish_reason') == 'stop':
+                        finished = True
+                    delta = choice.get('delta', {}).get('content')
                     if isinstance(delta, str) and delta:
                         yield delta
                 except (KeyError, TypeError, IndexError, json.JSONDecodeError) as exc:
                     log.warning('Unexpected vLLM stream frame: %s', type(exc).__name__)
+    if not finished:
+        raise ValueError('model stream interrupted')
 
 
 async def recognize_image(path: Path, mime: str) -> list[dict]:
@@ -81,16 +97,21 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
         raise HTTPException(503, '尚未配置多模态模型 VLLM_VISION_URL')
     img = base64.b64encode(path.read_bytes()).decode('ascii')
     prompt = ('识别图中的食物。只输出有效JSON对象：'
-              '{"items":[{"name":"食物名称","estimated_grams":120}]}。'
+              '{"items":[{"name":"食物名称","estimated_grams":120,"preparation":"煮熟",'
+              '"nutrition":{"basis_g":100,"kcal":100,"protein":5,"fat":4,"carbs":11}}]}。'
               '最多8项；无法确定食物时 items 为空数组。重量只是粗略估计，'
-              '用户必须人工确认。不要生成热量或营养素。')
+              '用户可以人工确认。根据可见食物、做法与用油估算每100克可食部的热量千卡和三大营养素克数，'
+              '不是整份营养；所有数值非负，热量最多930，三大营养素合计不超过100克。')
     payload = {'model': s.vllm_vision_model or s.vllm_model,
                'messages': [{'role': 'user', 'content': [
                    {'type': 'text', 'text': prompt},
                    {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img}'}}
                ]}], 'temperature': 0, 'max_tokens': s.vllm_vision_max_tokens,
-               'chat_template_kwargs': {'enable_thinking': s.vllm_vision_enable_thinking},
                'response_format': {'type': 'json_object'}}
+    if getattr(s, 'vllm_vision_api_style', 'vllm') == 'bailian':
+        payload['enable_thinking'] = s.vllm_vision_enable_thinking
+    else:
+        payload['chat_template_kwargs'] = {'enable_thinking': s.vllm_vision_enable_thinking}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(100, connect=8)) as client:
             response = await client.post(url, headers=_auth_headers(s.vllm_vision_api_key or s.vllm_api_key), json=payload)
@@ -110,9 +131,13 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
         items = result['items']
         if not isinstance(items, list):
             raise ValueError('items should be a list')
-        return [{'name': str(x.get('name', '未知食物'))[:80],
+        result = [{'name': str(x.get('name', '未知食物'))[:80],
                  'estimated_grams': max(5, min(3000, float(x.get('estimated_grams') or 100))),
+                 'preparation':str(x.get('preparation') or '')[:32],
+                 **({'nutrition':nutrition_estimate(x['nutrition']), 'source_type':'ai_estimate', 'verified':False,
+                     'source_model':s.vllm_vision_model or s.vllm_model} if 'nutrition' in x else {}),
                  'food_code': None} for x in items[:8] if isinstance(x, dict)]
+        return result
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         log.warning('Multimodal request failed: %s', type(exc).__name__)
         raise HTTPException(502, '多模态识别失败，请重试或手动记录') from exc

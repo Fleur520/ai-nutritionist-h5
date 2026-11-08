@@ -23,8 +23,11 @@ def enable_compact_vision_output(body):
         prompt = vision['system_prompt']
     else:
         prompt = next(p for p in vision['code_input']['value'] if p['key'] == 'system_prompt')
-    old = '{"items":[{"name":"菜名","estimated_grams":150,"preparation":"蒸熟"}]}'
-    new = '{"items":[["菜名",150,"蒸熟"]]}；每个三元素数组依次是名称、克重、preparation，顺序固定'
+    from bisheng_model_nutrition import LEGACY_SCHEMA, NUTRITION_SCHEMA
+    with_nutrition = NUTRITION_SCHEMA in prompt['value']
+    old = NUTRITION_SCHEMA if with_nutrition else LEGACY_SCHEMA
+    new = ('{"items":[["菜名",150,"蒸熟",100,5,4,11]]}；每个七元素数组依次是名称、克重、preparation、每100克kcal、protein、fat、carbs，顺序固定'
+           if with_nutrition else '{"items":[["菜名",150,"蒸熟"]]}；每个三元素数组依次是名称、克重、preparation，顺序固定')
     if prompt['value'].count(old) != 1:
         raise ValueError('Expected the original generated vision schema')
     prompt['value'] = prompt['value'].replace(old, new)
@@ -44,6 +47,11 @@ def enable_compact_vision_output(body):
     value["items"] = [dict(zip(("name", "estimated_grams", "preparation"), row)) for row in rows]
     vision = json.dumps(value, ensure_ascii=False)
 '''
+    if with_nutrition:
+        normalize = normalize.replace('len(row) != 3', 'len(row) != 7').replace(
+            '名称、克重、做法三元组', '名称、克重、做法与四项每100克营养七元组').replace(
+            '("name", "estimated_grams", "preparation")',
+            '("name", "estimated_grams", "preparation", "kcal", "protein", "fat", "carbs")')
     params['code']['value'] = ('def main(' + ', '.join(arguments) + '):\n' + normalize
                                + '    namespace = {}\n    exec(' + repr(source) + ', namespace, namespace)\n'
                                + '    return namespace["main"](' + ', '.join(arguments) + ')\n')

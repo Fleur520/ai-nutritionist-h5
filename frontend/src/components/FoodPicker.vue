@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { Search, SlidersHorizontal } from 'lucide-vue-next'
 import type { Food } from '../lib/api'
-const props = defineProps<{ foods: Food[]; modelValue: string; disabled?: boolean; initialQuery?: string }>()
+const props = defineProps<{ foods: Food[]; modelValue: string; disabled?: boolean; initialQuery?: string; optional?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const query = ref(props.initialQuery || ''), category = ref('')
 const categories = computed(() => [...new Set(props.foods.map(food => food.category || '原有食品'))].sort())
@@ -29,9 +29,9 @@ function change(event: Event) { emit('update:modelValue', (event.target as HTMLS
       <summary><SlidersHorizontal :size="14" aria-hidden="true" />{{ category || '按分类缩小范围' }}</summary>
       <label>食品分类<select v-model="category" :disabled="disabled"><option value="">全部分类</option><option v-for="name in categories" :key="name" :value="name">{{ name }}</option></select></label>
     </details>
-    <label>对应的食物
+    <label>{{ optional ? '关联食品库（可选）' : '对应的食物' }}
       <select :value="modelValue" :disabled="disabled" @change="change">
-        <option value="">请选择食物与生熟状态</option>
+        <option value="">{{ optional ? '不关联，使用照片 AI 估算' : '请选择食物与生熟状态' }}</option>
         <option v-for="food in visible" :key="food.code" :value="food.code">{{ food.name }}{{ food.preparation ? ' · ' + food.preparation : '' }} · {{ food.kcal }} kcal/100g{{ food.source_type === 'ai_estimate' ? ' · AI估算' : '' }}</option>
       </select>
     </label>

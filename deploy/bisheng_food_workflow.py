@@ -480,6 +480,8 @@ def main(argv=None):
     parser.add_argument("--text-model-id", type=int, required=True)
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--max-items", type=int, default=8)
+    parser.add_argument("--model-nutrition", action="store_true",
+                        help="Return visual per-100g nutrition estimates for matched and unmatched foods")
     parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--name", default="食光餐食识别与食品热量检索")
     parser.add_argument("--image-only-input", action="store_true",
@@ -508,6 +510,9 @@ def main(argv=None):
     if args.compact_model_invocation:
         from bisheng_compact_vision import enable_compact_vision
         body = enable_compact_vision(body)
+    if args.model_nutrition:
+        from bisheng_model_nutrition import enable_model_nutrition
+        body = enable_model_nutrition(body, args.vision_model_id)
     if args.compact_vision_output:
         from bisheng_code_runtime import enable_compact_vision_output
         body = enable_compact_vision_output(body)

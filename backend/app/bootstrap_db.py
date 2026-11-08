@@ -2,6 +2,7 @@
 import re
 
 from .config import get_settings
+from .db import mysql_tls
 
 
 def main():
@@ -18,6 +19,7 @@ def main():
         host=settings.mysql_host, port=settings.mysql_port,
         user=settings.mysql_user, password=settings.mysql_password,
         connect_timeout=settings.mysql_connect_timeout, charset='utf8mb4',
+        ssl=mysql_tls(settings),
     )
     try:
         with connection.cursor() as cursor:

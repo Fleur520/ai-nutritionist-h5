@@ -1,11 +1,19 @@
 """Small asynchronous adapter for SQLite development and MySQL deployments."""
 import asyncio
 import sqlite3
+import ssl
 from contextlib import asynccontextmanager
 import pymysql
 from .config import get_settings
 
 INTEGRITY_ERRORS = (sqlite3.IntegrityError, pymysql.IntegrityError)
+
+
+def mysql_tls(settings):
+    if not settings.mysql_ssl_enabled:
+        return None
+    # Verify both the certificate chain and hostname for hosted MySQL services.
+    return ssl.create_default_context(cafile=settings.mysql_ssl_ca or None)
 
 FOODS = [
  ('rice','米饭（熟）',116,2.6,.3,25.6),
@@ -139,6 +147,7 @@ async def connect():
             cursorclass=pymysql.cursors.DictCursor,
             connect_timeout=settings.mysql_connect_timeout,
             read_timeout=30,write_timeout=30,autocommit=False,
+            ssl=mysql_tls(settings),
             # Match SQLite's UTC CURRENT_TIMESTAMP behavior on every server.
             init_command="SET time_zone = '+00:00'",
         )

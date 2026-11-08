@@ -1,0 +1,16 @@
+.git
+.delivery
+.playwright-cli
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.db
+**/*.db-*
+backend/data
+test-results
+evals

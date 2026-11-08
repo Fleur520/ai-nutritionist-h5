@@ -187,6 +187,9 @@ def resolve_recognized_items(items: list[dict], catalog: list[dict]) -> list[dic
         for key in ('retrieval_evidence', 'snapshot_id'):
             if key in item:
                 result[key] = deepcopy(item[key])
+        if 'nutrition' in item:
+            result.update(nutrition=deepcopy(item['nutrition']), source_type='ai_estimate',
+                          source_model=item.get('source_model',''), verified=False)
         evidence, candidates, stale = _retrieved_candidates(item, by_code)
         result['candidates'] = [_public_food(food) for food in candidates.values()]
         selected = item.get('food_code')

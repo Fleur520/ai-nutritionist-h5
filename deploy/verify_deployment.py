@@ -27,8 +27,10 @@ def check(condition, message):
 async def cleanup(state):
     async with connect() as db:
         for user_id in state['users']:
+            await db.execute('DELETE FROM meal_recognitions WHERE user_id=?', (user_id,))
             meals = await (await db.execute('SELECT id FROM meals WHERE user_id=?', (user_id,))).fetchall()
             for meal in meals:
+                await db.execute('DELETE FROM meal_item_estimates WHERE meal_item_id IN (SELECT id FROM meal_items WHERE meal_id=?)', (meal['id'],))
                 await db.execute('DELETE FROM meal_items WHERE meal_id=?', (meal['id'],))
             for table in ('sessions', 'profiles', 'images', 'meals', 'chat_messages', 'nutrition_reports'):
                 await db.execute(f'DELETE FROM {table} WHERE user_id=?', (user_id,))
