@@ -6,7 +6,7 @@ const originalFetch = globalThis.fetch
 const encoder = new TextEncoder()
 const event = (type, data) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
 try {
-  const { streamMessage, api } = await server.ssrLoadModule('/src/lib/api.ts')
+  const { streamMessage, pollMessage, api } = await server.ssrLoadModule('/src/lib/api.ts')
   const fixtures = []
   const check = async (name, test) => { await test(); fixtures.push(name); console.log(`PASS ${name}`) }
   const mockStream = text => {
@@ -75,6 +75,41 @@ try {
     globalThis.fetch = async () => { throw new TypeError('Failed to fetch') }
     await assert.rejects(api('/profile'), /网络连接失败/)
     await assert.rejects(streamMessage('test', 'test', () => {}), /网络连接失败/)
+  })
+  await check('poll transport exposes real partial updates before completion', async () => {
+    let reads=0,answer=''
+    const paths=[]
+    globalThis.fetch=async (url,init)=>{
+      paths.push(url)
+      if(init.method==='POST')return Response.json({id:'job-1'})
+      reads++
+      if(reads===1)return Response.json({frames:[event('delta',{content:'第一段'})],cursor:1,state:'running'})
+      assert.equal(answer,'第一段')
+      assert.match(url,/after=1$/)
+      return Response.json({frames:[event('delta',{content:'第二段'}),event('done',{})],cursor:3,state:'complete'})
+    }
+    await pollMessage('test','thread',value=>{answer+=value})
+    assert.equal(answer,'第一段第二段')
+    assert.equal(paths.filter(url=>url==='/api/chat/jobs').length,1)
+  })
+  await check('stopping poll transport cancels server generation', async () => {
+    const controller=new AbortController()
+    let cancelled=false
+    globalThis.fetch=async (_url,init)=>{
+      if(init.method==='POST')return Response.json({id:'job-2'})
+      if(init.method==='DELETE'){cancelled=true;return Response.json({state:'stopped'})}
+      return Response.json({frames:[event('delta',{content:'部分'})],cursor:1,state:'running'})
+    }
+    await assert.rejects(pollMessage('test','thread',()=>controller.abort(),controller.signal),{name:'AbortError'})
+    assert.equal(cancelled,true)
+  })
+  await check('poll transport never treats failure as completion', async () => {
+    globalThis.fetch=async (_url,init)=>{
+      if(init.method==='POST')return Response.json({id:'job-3'})
+      if(init.method==='DELETE')return Response.json({state:'failed'})
+      return Response.json({frames:[event('error',{message:'模型暂时不可用'})],cursor:1,state:'failed'})
+    }
+    await assert.rejects(pollMessage('test','thread',()=>{}),/模型暂时不可用/)
   })
   console.log(`${fixtures.length} API and streaming checks passed`)
 } finally {

@@ -20,6 +20,7 @@ from .ai import chat_chunks, recognize_image
 from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
 from .recognition_jobs import RecognitionBusy, RecognitionJobs
+from .chat_jobs import ChatJobs
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
@@ -34,6 +35,7 @@ settings=get_settings()
 AI_SEM=asyncio.Semaphore(max(1,settings.app_max_ai_concurrency))
 IMAGE_SEM=asyncio.Semaphore(settings.app_max_image_concurrency)
 RECOGNITION_JOBS=RecognitionJobs(settings.app_max_ai_concurrency)
+CHAT_JOBS=ChatJobs(settings.app_max_ai_concurrency)
 Image.MAX_IMAGE_PIXELS=16_000_000
 
 @asynccontextmanager
@@ -45,6 +47,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await CHAT_JOBS.close()
         await RECOGNITION_JOBS.close()
 
 app=FastAPI(title='AI 营养师 API',version='0.1.0',lifespan=lifespan)
@@ -396,8 +399,7 @@ async def get_report(report_id:str,user:str=Depends(current_user)):
     output['summary']=json.loads(output.pop('summary_json'))
     return output
 
-@app.post('/api/chat/stream')
-async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
+async def prepare_chat(body:ChatMessage,user:str):
     async with connect() as db:
         cur=await db.execute('SELECT * FROM profiles WHERE user_id=?',(user,))
         user_profile=rowdict(await cur.fetchone()) or {}
@@ -431,7 +433,31 @@ async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
             yield event('error',{'message':'咨询服务暂时不可用，请稍后再试'})
         finally:
             AI_SEM.release()
-    return StreamingResponse(generate(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+    return generate()
+
+@app.post('/api/chat/stream')
+async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
+    return StreamingResponse(await prepare_chat(body,user),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+@app.post('/api/chat/jobs',status_code=202)
+async def start_chat_job(body:ChatMessage,response:Response,user:str=Depends(current_user)):
+    if not settings.demo_mode and not settings.vllm_chat_completions_url:
+        raise HTTPException(503,'AI 咨询暂时不可用，请稍后再试')
+    async def source():
+        async for frame in await prepare_chat(body,user):
+            yield frame
+    response.headers['Cache-Control']='private, no-store'
+    return {'id':CHAT_JOBS.start(user,body.thread_id,source)}
+
+@app.get('/api/chat/jobs/{job_id}')
+async def read_chat_job(job_id:str,response:Response,after:int=0,user:str=Depends(current_user)):
+    response.headers['Cache-Control']='private, no-store'
+    return CHAT_JOBS.read(job_id,user,after)
+
+@app.delete('/api/chat/jobs/{job_id}')
+async def stop_chat_job(job_id:str,response:Response,user:str=Depends(current_user)):
+    response.headers['Cache-Control']='private, no-store'
+    return await CHAT_JOBS.stop(job_id,user)
 
 @app.get('/api/chat/history')
 async def history(thread_id:str,user:str=Depends(current_user)):
