@@ -6,6 +6,9 @@ class Credentials(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8,max_length=128)
 
+class LoginCredentials(Credentials):
+    email: str = Field(min_length=1, max_length=254)
+
 class ProfilePatch(BaseModel):
     name: str=Field('',max_length=60)
     age: int|None=Field(None,ge=18,le=110)
@@ -29,3 +32,4 @@ class MealCreate(BaseModel):
 class ChatMessage(BaseModel):
     message: str=Field(min_length=1,max_length=1500)
     thread_id: str=Field(min_length=1,max_length=90,pattern=r'^[\w-]+$')
+

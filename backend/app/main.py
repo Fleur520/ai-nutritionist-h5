@@ -27,7 +27,7 @@ from .auth import COOKIE, check_password, create_session, current_user, hash_pas
 from .config import get_settings
 from .db import INTEGRITY_ERRORS, connect, initialize
 from .food_catalog import catalog_rows, initialize_catalog, match_food
-from .schemas import ChatMessage, Credentials, MealCreate, ProfilePatch
+from .schemas import ChatMessage, Credentials, LoginCredentials, MealCreate, ProfilePatch
 from .meal_estimates import (NUTRIENTS, initialize_estimates, save_recognition,
                              recognition_for_meal, model_item)
 
@@ -100,9 +100,13 @@ async def register(body:Credentials,response:Response):
     return {'user_id':user_id,'email':email}
 
 @app.post('/api/auth/login')
-async def login(body:Credentials,response:Response):
+async def login(body:LoginCredentials,response:Response):
+    email=body.email.strip().lower()
+    alias=settings.app_login_alias.strip().lower()
+    if alias and '@' not in alias and settings.app_login_alias_email and email == alias:
+        email=settings.app_login_alias_email.strip().lower()
     async with connect() as db:
-        cur=await db.execute('SELECT id,password_hash FROM users WHERE email=?',(body.email.strip().lower(),))
+        cur=await db.execute('SELECT id,password_hash FROM users WHERE email=?',(email,))
         r=await cur.fetchone()
     if not r or not check_password(body.password,r['password_hash']):
         raise HTTPException(401,'账号或密码错误')
@@ -484,3 +488,4 @@ async def history(thread_id:str,user:str=Depends(current_user)):
 if settings.app_static_dir:
     from fastapi.staticfiles import StaticFiles
     app.mount('/', StaticFiles(directory=settings.app_static_dir, html=True), name='frontend')
+

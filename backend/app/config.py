@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     demo_mode: bool = False
     app_cookie_secure: bool = True
     app_allowed_origin: str = 'http://localhost:5173'
+    app_login_alias: str = ''
+    app_login_alias_email: str = ''
     app_db_engine: Literal['sqlite', 'mysql'] = 'sqlite'
     app_db_path: Path = Path('./data/nutrition.db')
     mysql_host: str = '127.0.0.1'
@@ -57,3 +59,4 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
