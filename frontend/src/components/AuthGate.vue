@@ -3,7 +3,9 @@ import { ref } from 'vue'
 import { api, jsonBody } from '../lib/api'
 import { Sparkles, ArrowRight, Eye, EyeOff, Camera, MessageCircle, BookOpen } from 'lucide-vue-next'
 const emit = defineEmits<{ authenticated: [] }>()
-const register = ref(false), email = ref(''), password = ref(''), busy = ref(false), error = ref(''), showPassword = ref(false)
+const defaultEmail = import.meta.env.VITE_DEFAULT_LOGIN_EMAIL || ''
+const defaultPassword = import.meta.env.VITE_DEFAULT_LOGIN_PASSWORD || ''
+const register = ref(false), email = ref(defaultEmail), password = ref(defaultPassword), busy = ref(false), error = ref(''), showPassword = ref(false)
 async function submit() {
   if (busy.value) return
   busy.value = true; error.value = ''
@@ -11,7 +13,11 @@ async function submit() {
   catch (failure) { error.value = failure instanceof Error ? failure.message : '登录失败，请稍后再试' }
   finally { busy.value = false }
 }
-function switchMode() { register.value = !register.value; error.value = ''; showPassword.value = false }
+function switchMode() {
+  register.value = !register.value; error.value = ''; showPassword.value = false
+  email.value = register.value ? '' : defaultEmail
+  password.value = register.value ? '' : defaultPassword
+}
 </script>
 
 <template>
