@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount } from 'vue'
+import { ref, computed, onBeforeUnmount, onDeactivated } from 'vue'
 import { Camera, Images, Expand, Check, LoaderCircle, Plus, Trash2, Utensils, RefreshCw } from 'lucide-vue-next'
 import { api, jsonBody, type Food, type Recognized } from '../lib/api'
 import FoodPicker from '../components/FoodPicker.vue'
@@ -26,6 +26,7 @@ async function loadFoods() {
   finally { foodsLoading.value = false }
 }
 onBeforeUnmount(() => { disposed = true; request.abort(); if (preview.value) URL.revokeObjectURL(preview.value) })
+onDeactivated(() => { viewingPhoto.value = false })
 function reference(item: ScanItem) { return item.nutritionSource === 'model' ? item.nutrition : foodsByCode.value.get(item.food_code || '') }
 function validWeight(item: ScanItem) { return Number.isFinite(item.estimated_grams) && item.estimated_grams >= 5 && item.estimated_grams <= 3000 }
 function amount(item: ScanItem, key: 'kcal' | 'protein' | 'fat' | 'carbs') { return reference(item) && validWeight(item) ? reference(item)![key] * item.estimated_grams / 100 : null }
@@ -109,6 +110,7 @@ async function save() {
     await api('/meals', { method: 'POST', body: jsonBody({ meal_type: mealType.value, eaten_at: new Date().toISOString(), image_id: imageId.value || null, recognition_id: recognitionId.value || null,
       items: items.value.map(item => ({ food_code: item.nutritionSource === 'model' ? null : item.food_code || null, grams: item.estimated_grams, nutrition_source: item.nutritionSource, recognition_index: item.recognitionIndex })) }), signal: request.signal })
     if (disposed) return
+    viewingPhoto.value = false
     items.value = []; imageId.value = ''; recognitionId.value = ''; selectedFile = null; uploadFile = null
     if (preview.value) URL.revokeObjectURL(preview.value)
     preview.value = ''; notice.value = ''; saved.value = true
