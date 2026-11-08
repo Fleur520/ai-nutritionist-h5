@@ -1,0 +1,1 @@
+{"id":"synthetic-food-grounding","user_input":"这条测试米饭记录每100克含多少能量？","response":"这条测试记录中，米饭每100克含116千卡。","retrieved_contexts":["合成测试记录：米饭，熟制，每100克可食部，能量116千卡。仅用于评测演示。"],"reference":"测试记录为熟米饭，每100克116千卡。"}

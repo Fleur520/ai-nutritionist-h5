@@ -132,6 +132,8 @@ curl http://172.16.10.3:18080/api/health
 
 ## 四、测试与本地开发
 
+可选的 Ragas / DeepEval 离线 AI 评测、JSONL 样本格式及 vLLM judge 配置见 [评测说明](evals/README.md)。
+
 ```bash
 cd backend
 python -m pip install -r requirements.lock.txt
