@@ -69,13 +69,14 @@ def test_idle_timeout_failure_and_expired_results_are_bounded():
         jobs.jobs[key].finished -= 121
         with pytest.raises(HTTPException):
             jobs.read(key, 'alice', 0)
-        async def oversized():
-            yield 'x' * 128001
-        key = jobs.start('alice', 'large', oversized)
-        await jobs.jobs[key].task
-        result = jobs.read(key, 'alice', 0)
-        assert result['state'] == 'failed' and len(result['frames']) == 1
-        assert 'event: error' in result['frames'][0]
+        for payload in ['x' * 128001, '汉' * 50000]:
+            async def oversized():
+                yield payload
+            key = jobs.start('alice', 'large', oversized)
+            await jobs.jobs[key].task
+            result = jobs.read(key, 'alice', 0)
+            assert result['state'] == 'failed' and len(result['frames']) == 1
+            assert 'event: error' in result['frames'][0]
         await jobs.close()
     asyncio.run(run())
 

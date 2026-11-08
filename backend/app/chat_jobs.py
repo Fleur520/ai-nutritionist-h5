@@ -66,7 +66,7 @@ class ChatJobs:
         try:
             async def consume():
                 async for frame in iterator:
-                    job.size += len(frame)
+                    job.size += len(frame.encode('utf-8'))
                     if job.size > 128_000 or len(job.frames) >= 8192:
                         raise ValueError('chat output exceeds delivery limit')
                     job.frames.append(frame)

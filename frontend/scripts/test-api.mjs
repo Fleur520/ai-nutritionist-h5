@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'vite'
 
-const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' })
+const server = await createServer({ define: { 'import.meta.env.VITE_CHAT_TRANSPORT': '"sse"' }, server: { middlewareMode: true }, appType: 'custom' })
 const originalFetch = globalThis.fetch
 const encoder = new TextEncoder()
 const event = (type, data) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
