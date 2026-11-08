@@ -402,7 +402,7 @@ async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
         cur=await db.execute('SELECT * FROM profiles WHERE user_id=?',(user,))
         user_profile=rowdict(await cur.fetchone()) or {}
     if not settings.demo_mode and not settings.vllm_chat_completions_url:
-        raise HTTPException(503,'尚未配置 vLLM 模型接口')
+        raise HTTPException(503,'AI 咨询暂时不可用，请稍后再试')
     async with connect() as db:
         cur=await db.execute('SELECT role,content FROM chat_messages WHERE user_id=? AND thread_id=? ORDER BY created_at,id DESC LIMIT 12',(user,body.thread_id))
         conversation=[rowdict(r) for r in await cur.fetchall()]
@@ -419,6 +419,8 @@ async def stream_chat(body:ChatMessage,user:str=Depends(current_user)):
             async for text in chat_chunks(body.message,conversation,user_profile):
                 parts.append(text)
                 yield event('delta',{'content':text})
+            if not ''.join(parts).strip():
+                raise ValueError('empty model reply')
             async with connect() as db:
                 await db.execute('INSERT INTO chat_messages(id,user_id,thread_id,role,content) VALUES(?,?,?,?,?)',
                                  (str(uuid.uuid4()),user,body.thread_id,'assistant',''.join(parts)))

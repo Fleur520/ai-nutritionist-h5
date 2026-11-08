@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     bisheng_report_input_key: str = 'report_context'
     vllm_chat_completions_url: str = ''
     vllm_api_key: str = ''
+    vllm_api_style: Literal['vllm', 'bailian'] = 'vllm'
     vllm_model: str = 'Qwen3.5-27B-FP8'
     vllm_max_tokens: int = 768
     vllm_vision_url: str = ''
