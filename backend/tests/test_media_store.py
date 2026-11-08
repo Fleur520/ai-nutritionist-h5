@@ -37,7 +37,7 @@ def test_database_photos_survive_local_disk_loss_and_remain_private(recognition_
 
 
 def test_hosted_mysql_tls_verifies_certificate_and_hostname(recognition_api):
-    settings = recognition_api.settings
+    settings = recognition_api.settings.model_copy()
     assert mysql_tls(settings) is None
     settings.mysql_ssl_enabled = True
     context = mysql_tls(settings)
