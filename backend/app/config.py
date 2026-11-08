@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     mysql_password: str = ''
     mysql_database: str = 'ai_nutritionist'
     mysql_connect_timeout: int = Field(10, ge=1, le=60)
+    mysql_ssl_enabled: bool = False
+    mysql_ssl_ca: str = ''
     app_media_dir: Path = Path('./data/media')
+    app_image_storage: Literal['filesystem', 'database'] = 'filesystem'
+    app_static_dir: str = ''
     app_nginx_accel: bool = False
     app_max_ai_concurrency: int = 10
     app_max_image_concurrency: int = Field(4, ge=1, le=32)

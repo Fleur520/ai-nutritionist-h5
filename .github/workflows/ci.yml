@@ -71,6 +71,19 @@ jobs:
           docker build -t nutrition-api:ci backend
           docker run --rm nutrition-api:ci python -c "from app.main import app; assert app.title"
           docker build --build-arg VITE_REPORTS_ENABLED=false -t nutrition-web:ci frontend
+      - name: Accept free-hosting image before public startup
+        run: |
+          docker build -t nutrition-hosted:ci .
+          docker run -d --name nutrition-hosted-ci -p 127.0.0.1:18081:10000 -e APP_DB_ENGINE=sqlite -e APP_DB_PATH=/tmp/test_hosted.db -e APP_IMAGE_STORAGE=database -e DEMO_MODE=true -e APP_COOKIE_SECURE=false -e APP_REPORTS_ENABLED=false -e APP_REVISION=ci nutrition-hosted:ci
+          trap 'docker logs --tail 100 nutrition-hosted-ci; docker rm -f nutrition-hosted-ci' EXIT
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:18081/api/health > /dev/null; then
+              curl --fail --silent http://127.0.0.1:18081/api/version
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -21,6 +21,7 @@ from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
 from .recognition_jobs import RecognitionBusy, RecognitionJobs
 from .chat_jobs import ChatJobs
+from .media_store import initialize_media, image_content, recognition_path
 from .reporting import generate_report
 from .auth import COOKIE, check_password, create_session, current_user, hash_password, token_digest
 from .config import get_settings
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
     await initialize()
     await initialize_catalog()
     await initialize_estimates()
+    await initialize_media(settings)
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
     try:
         yield
@@ -182,10 +184,18 @@ async def upload_image(file:UploadFile=File(...),user:str=Depends(current_user))
         if cancelled:
             out.unlink(missing_ok=True)
             raise asyncio.CancelledError()
-    async with connect() as db:
-        await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
-                         (image_id,user,str(out),'image/jpeg'))
-        await db.commit()
+    try:
+        async with connect() as db:
+            stored_path = 'db:' + image_id if settings.app_image_storage == 'database' else str(out)
+            await db.execute('INSERT INTO images(id,user_id,path,mime) VALUES(?,?,?,?)',
+                             (image_id,user,stored_path,'image/jpeg'))
+            if settings.app_image_storage == 'database':
+                content = await asyncio.to_thread(out.read_bytes)
+                await db.execute('INSERT INTO image_payloads(image_id,content) VALUES(?,?)', (image_id, content))
+            await db.commit()
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
     return {'id':image_id,'url':f'/api/images/{image_id}'}
 
 @app.get('/api/images/{image_id}')
@@ -194,6 +204,8 @@ async def read_image(image_id:str,user:str=Depends(current_user)):
         cur=await db.execute('SELECT path FROM images WHERE id=? AND user_id=?',(image_id,user))
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
+    if r['path'] == 'db:' + image_id:
+        return Response(await image_content(image_id), media_type='image/jpeg', headers={'Cache-Control':'private, no-store'})
     path=Path(r['path']).resolve()
     if not path.is_file() or path.parent != settings.app_media_dir.resolve(): raise HTTPException(404,'图片不存在')
     if getattr(settings,'app_nginx_accel',False):
@@ -227,10 +239,11 @@ async def recognize(body:dict,user:str=Depends(current_user)):
         cur=await db.execute('SELECT path,mime FROM images WHERE id=? AND user_id=?',(image_id,user))
         r=await cur.fetchone()
     if not r: raise HTTPException(404,'图片不存在')
+    path = await recognition_path(image_id, r['path'], settings)
     waiting=time.perf_counter()
     try:
         result,coalesced=await RECOGNITION_JOBS.run((user,image_id),
-            lambda:recognize_once(Path(r['path']),r['mime'],started))
+            lambda:recognize_once(path,r['mime'],started))
     except RecognitionBusy as exc:
         raise HTTPException(429,'AI 请求繁忙，请稍后再试') from exc
     recognized,use_workflow,job_timings=result
@@ -465,3 +478,9 @@ async def history(thread_id:str,user:str=Depends(current_user)):
     async with connect() as db:
         cur=await db.execute('SELECT role,content,created_at FROM chat_messages WHERE user_id=? AND thread_id=? ORDER BY created_at,id LIMIT 100',(user,thread_id))
         return [rowdict(r) for r in await cur.fetchall()]
+
+# A single container can serve the built H5 on a free web host. API routes above
+# take precedence; the original two-container deployment leaves this disabled.
+if settings.app_static_dir:
+    from fastapi.staticfiles import StaticFiles
+    app.mount('/', StaticFiles(directory=settings.app_static_dir, html=True), name='frontend')

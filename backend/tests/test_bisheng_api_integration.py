@@ -60,6 +60,8 @@ def recognition_api(tmp_path, monkeypatch):
     async def cleanup():
         async with database.connect() as db:
             for user in users:
+                if settings.app_image_storage == 'database':
+                    await db.execute('DELETE FROM image_payloads WHERE image_id IN (SELECT id FROM images WHERE user_id=?)', (user,))
                 await db.execute('DELETE FROM meal_item_estimates WHERE meal_item_id IN (SELECT i.id FROM meal_items i JOIN meals m ON m.id=i.meal_id WHERE m.user_id=?)', (user,))
                 await db.execute('DELETE FROM meal_recognitions WHERE user_id=?', (user,))
                 await db.execute('DELETE FROM meal_items WHERE meal_id IN (SELECT id FROM meals WHERE user_id=?)', (user,))
