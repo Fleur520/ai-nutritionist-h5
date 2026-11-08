@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     vllm_vision_url: str = ''
     vllm_vision_model: str = ''
     vllm_vision_api_key: str = ''
+    # Bailian accepts enable_thinking at the request top level; vLLM nests it.
+    vllm_vision_api_style: Literal['vllm', 'bailian'] = 'vllm'
     vllm_vision_max_tokens: int = Field(1536, ge=128, le=16384)
     vllm_vision_enable_thinking: bool = False
 

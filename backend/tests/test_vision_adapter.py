@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from app import ai
 
 
-def setup_model(monkeypatch, tmp_path, body):
+def setup_model(monkeypatch, tmp_path, body, **overrides):
     requests = []
     original_client = httpx.AsyncClient
 
@@ -20,16 +20,48 @@ def setup_model(monkeypatch, tmp_path, body):
 
     monkeypatch.setattr(ai.httpx, 'AsyncClient', lambda **kwargs: original_client(
         transport=httpx.MockTransport(handle), **kwargs))
-    monkeypatch.setattr(ai, 'get_settings', lambda: SimpleNamespace(
+    settings = SimpleNamespace(
         demo_mode=False, vllm_vision_url='',
         vllm_chat_completions_url='http://model.test/v1/chat/completions',
         vllm_vision_model='', vllm_model='Qwen3.8-27B',
         vllm_vision_api_key='', vllm_api_key='test-key',
         vllm_vision_max_tokens=1536, vllm_vision_enable_thinking=False,
-    ))
+    )
+    settings.__dict__.update(overrides)
+    monkeypatch.setattr(ai, 'get_settings', lambda: settings)
     photo = tmp_path / 'photo.jpg'
     photo.write_bytes(b'test-image-bytes')
     return photo, requests
+
+
+def test_bailian_flash_request_and_estimate_provenance(monkeypatch, tmp_path):
+    nutrition = {'basis_g': 100, 'kcal': 120, 'protein': 4, 'fat': 4, 'carbs': 17}
+    photo, requests = setup_model(monkeypatch, tmp_path, {
+        'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({
+            'items': [{'name': '米饭', 'estimated_grams': 150, 'preparation': '煮熟', 'nutrition': nutrition}]
+        })}}]
+    }, vllm_vision_api_style='bailian', vllm_vision_model='qwen3.7-flash',
+       vllm_vision_url='https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions')
+    items = asyncio.run(ai.recognize_image(photo, 'image/jpeg'))
+    payload = requests[0]
+    assert payload['model'] == 'qwen3.7-flash'
+    assert payload['enable_thinking'] is False
+    assert 'chat_template_kwargs' not in payload
+    assert payload['response_format'] == {'type': 'json_object'}
+    assert payload['messages'][0]['content'][1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+    assert items[0]['nutrition'] == nutrition
+    assert items[0]['source_type'] == 'ai_estimate' and items[0]['verified'] is False
+    assert items[0]['source_model'] == 'qwen3.7-flash'
+    assert items[0]['preparation'] == '煮熟'
+
+
+def test_bailian_truncated_estimate_rejected(monkeypatch, tmp_path):
+    photo, _ = setup_model(monkeypatch, tmp_path, {
+        'choices': [{'finish_reason': 'length', 'message': {'content': '{"items":[]}'}}]
+    }, vllm_vision_api_style='bailian')
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(ai.recognize_image(photo, 'image/jpeg'))
+    assert error.value.status_code == 502
 
 
 def test_vision_disables_thinking_and_parses_foods(monkeypatch, tmp_path):

@@ -92,8 +92,11 @@ async def recognize_image(path: Path, mime: str) -> list[dict]:
                    {'type': 'text', 'text': prompt},
                    {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img}'}}
                ]}], 'temperature': 0, 'max_tokens': s.vllm_vision_max_tokens,
-               'chat_template_kwargs': {'enable_thinking': s.vllm_vision_enable_thinking},
                'response_format': {'type': 'json_object'}}
+    if getattr(s, 'vllm_vision_api_style', 'vllm') == 'bailian':
+        payload['enable_thinking'] = s.vllm_vision_enable_thinking
+    else:
+        payload['chat_template_kwargs'] = {'enable_thinking': s.vllm_vision_enable_thinking}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(100, connect=8)) as client:
             response = await client.post(url, headers=_auth_headers(s.vllm_vision_api_key or s.vllm_api_key), json=payload)
