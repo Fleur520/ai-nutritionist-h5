@@ -50,7 +50,65 @@ export async function api<T>(path:string, init:RequestInit={}):Promise<T> {
 }
 export const jsonBody=(v:unknown)=>JSON.stringify(v)
 
+function readFrame(block:string):{type:string;data:Record<string,unknown>}|null {
+  let type='message'
+  const lines:string[]=[]
+  for(const line of block.split('\n')){
+    if(line.startsWith('event:'))type=line.slice(6).trim()
+    if(line.startsWith('data:'))lines.push(line.slice(5).trimStart())
+  }
+  const raw=lines.join('\n')
+  if(!raw)return null
+  let data
+  try{data=JSON.parse(raw)}catch{throw new Error('AI 回复格式异常，请重试')}
+  if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('AI 回复格式异常，请重试')
+  return {type,data}
+}
+function pollDelay(signal?:AbortSignal) {
+  return new Promise<void>((resolve,reject)=>{
+    const cancel=()=>{clearTimeout(timer);signal?.removeEventListener('abort',cancel);reject(signal?.reason||new DOMException('Aborted','AbortError'))}
+    const timer=setTimeout(()=>{signal?.removeEventListener('abort',cancel);resolve()},250)
+    signal?.addEventListener('abort',cancel,{once:true})
+    if(signal?.aborted)cancel()
+  })
+}
+export async function pollMessage(message:string,threadId:string,onDelta:(s:string)=>void,signal?:AbortSignal):Promise<void> {
+  let id='',finished=false,answer='',cursor=0
+  const started=Date.now()
+  try{
+    const job=await api<{id:string}>('/chat/jobs',{method:'POST',body:jsonBody({message,thread_id:threadId}),signal})
+    if(typeof job.id!=='string'||!job.id)throw new Error('无法开始回复，请重试')
+    id=job.id
+    while(!finished){
+      signal?.throwIfAborted()
+      if(Date.now()-started>185000)throw new Error('回复等待超时，请重试')
+      const update=await api<{frames:string[];cursor:number;state:string}>('/chat/jobs/'+encodeURIComponent(id)+'?after='+cursor,{signal,cache:'no-store'})
+      if(!Array.isArray(update.frames)||!Number.isInteger(update.cursor)||update.cursor!==cursor+update.frames.length)throw new Error('AI 回复读取异常，请重试')
+      for(const frame of update.frames){
+        if(typeof frame!=='string')throw new Error('AI 回复格式异常，请重试')
+        const event=readFrame(frame.trimEnd())
+        if(!event)continue
+        const {type,data}=event
+        if(type==='delta'&&typeof data.content==='string'){answer+=data.content;onDelta(data.content)}
+        if(type==='error')throw new Error(typeof data.message==='string'&&data.message.trim()?data.message:'AI 响应失败，请重试')
+        if(type==='done')finished=true
+      }
+      cursor=update.cursor
+      if(!finished&&update.state!=='running')throw new Error(update.state==='stopped'?'回答已停止，请重新提问':'AI 回复中断，请重试')
+      if(!finished)await pollDelay(signal)
+    }
+    if(!answer.trim())throw new Error('AI 暂时没有返回内容，请重试')
+  }finally{
+    if(id&&!finished){
+      const cancel=new AbortController(),timer=setTimeout(()=>cancel.abort(),3000)
+      try{await api('/chat/jobs/'+encodeURIComponent(id),{method:'DELETE',signal:cancel.signal}).catch(()=>{})}
+      finally{clearTimeout(timer)}
+    }
+  }
+}
+
 export async function streamMessage(message:string,threadId:string,onDelta:(s:string)=>void,signal?:AbortSignal):Promise<void> {
+  if(import.meta.env.VITE_CHAT_TRANSPORT==='poll')return pollMessage(message,threadId,onDelta,signal)
   const response=await requestFetch('/api/chat/stream',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:jsonBody({message,thread_id:threadId}),signal})
   if(!response.ok)throw await responseError(response)
   if(!response.body)throw new Error('浏览器不支持流式响应')
@@ -65,17 +123,9 @@ export async function streamMessage(message:string,threadId:string,onDelta:(s:st
     let index=-1
     while((index=pending.indexOf('\n\n'))!==-1){
       const block=pending.slice(0,index);pending=pending.slice(index+2)
-      let type='message'
-      const lines:string[]=[]
-      for(const line of block.split('\n')){
-        if(line.startsWith('event:'))type=line.slice(6).trim()
-        if(line.startsWith('data:'))lines.push(line.slice(5).trimStart())
-      }
-      const raw=lines.join('\n')
-      if(!raw)continue
-      let data
-      try{data=JSON.parse(raw)}catch{throw new Error('AI 回复格式异常，请重试')}
-      if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('AI 回复格式异常，请重试')
+      const frame=readFrame(block)
+      if(!frame)continue
+      const {type,data}=frame
       if(type==='delta'&&typeof data.content==='string'){answer+=data.content;onDelta(data.content)}
       if(type==='error')throw new Error(typeof data.message==='string'&&data.message.trim()?data.message:'AI 响应失败，请重试')
       if(type==='done'){finished=true;break}
