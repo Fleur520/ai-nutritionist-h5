@@ -19,7 +19,20 @@ flowchart TB
 
 - **首页**：今日摄入汇总、拍照、营养咨询和报告入口。
 - **拍照**：上传 JPG/PNG/WebP → BiSheng 识别并检索食品知识库（也支持直接模型模式）→ 应用数据库复核编码与做法 → 人工确认食物/重量 → 成分表计算与保存。详见 [餐食识别接入说明](docs/BISHENG_FOOD_RECOGNITION.md)。
-- **AI 咨询**：FastAPI 调用 vLLM `/v1/chat/completions` SSE，携带用户档案及最近 12 条会话消息，**不经过 BiSheng**。咨询时通过进程内 MCP 工具读取当前登录用户当天餐食和营养汇总；工具仅供本进程调用，不对外提供 MCP 端点。模型不能指定用户或执行 SQL；明细有数量上限，汇总覆盖当天全部已记录数据。演示模式会显示当日热量，但不调用模型。数据可能不完整，AI 估算食物未经核验。
+- **AI 咨询**：FastAPI 调用 vLLM `/v1/chat/completions` SSE，携带用户档案及最近 12 条会话消息，**不经过 BiSheng**。咨询时通过 MCP 工具读取当前登录用户当天餐食和营养汇总；模型不能指定用户或执行 SQL；明细有数量上限，汇总覆盖当天全部已记录数据。演示模式会显示当日热量，但不调用模型。数据可能不完整，AI 估算食物未经核验。
+
+### 外部 MCP 客户端
+
+部署本版本后，使用 Streamable HTTP 地址 `https://<托管域名>/mcp/`，在支持自定义请求头的客户端设置 `Authorization: Bearer <令牌>`。服务为无状态 JSON 响应，不提供 OAuth 授权发现；仅支持可设置 Bearer 请求头的客户端。可用工具 `get_today_nutrition` 只读取令牌所属用户的当天餐食和汇总。勿将令牌放入 URL、代码仓库或聊天消息。
+
+先正常登录网站，在同一浏览器的开发者工具 Console 中执行以下命令，令牌只显示一次，30 天有效；再次签发会使上一个令牌失效。只在可信浏览器执行，勿把令牌发给他人：
+
+```js
+const r = await fetch('/api/mcp/token', {method: 'POST'});
+console.log(await r.json());
+```
+
+撤销令牌：`fetch('/api/mcp/token', {method: 'DELETE'})`。两项操作均需当前网站登录会话，且不会修改餐食数据。服务应只通过 HTTPS 对外提供。此接口在本版本合并和成功部署前不可用。
 - **饮食记录**：每日三餐记录和统计；按 `Asia/Shanghai` 日期聚合。
 - **报告**：FastAPI 汇总近 7/30 日数据 → `BiSheng 1.3.1 /api/v2/workflow/invoke` → 保存报告文本和统计快照 → H5 展示历史。
 - **我的**：注册/登录、个人档案、目标。会话 Cookie 为 HttpOnly，同一用户数据隔离。
