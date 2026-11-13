@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .ai import chat_chunks, recognize_image
+from .nutrition_mcp import today_context, http_server, BearerAuth
 from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
 from .recognition_jobs import RecognitionBusy, RecognitionJobs
@@ -46,11 +47,14 @@ async def lifespan(app: FastAPI):
     await initialize_estimates()
     await initialize_media(settings)
     settings.app_media_dir.mkdir(parents=True,exist_ok=True)
-    try:
-        yield
-    finally:
-        await CHAT_JOBS.close()
-        await RECOGNITION_JOBS.close()
+    mcp = http_server(nutrition_summary_for_user, today_meals_for_user)
+    app.state.mcp_http = BearerAuth(mcp.streamable_http_app())
+    async with mcp.session_manager.run():
+        try:
+            yield
+        finally:
+            await CHAT_JOBS.close()
+            await RECOGNITION_JOBS.close()
 
 app=FastAPI(title='AI 营养师 API',version='0.1.0',lifespan=lifespan)
 
@@ -128,6 +132,26 @@ async def me(user:str=Depends(current_user)):
     async with connect() as db:
         cur=await db.execute('SELECT id,email FROM users WHERE id=?',(user,))
         return rowdict(await cur.fetchone())
+
+@app.post('/api/mcp/token')
+async def issue_mcp_token(response:Response,user:str=Depends(current_user)):
+    token = secrets.token_urlsafe(40)
+    expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    async with connect() as db:
+        await db.execute('DELETE FROM mcp_tokens WHERE user_id=?',(user,))
+        await db.execute('INSERT INTO mcp_tokens(user_id,token_hash,expires_at) VALUES(?,?,?)',
+                         (user,token_digest(token),expires))
+        await db.commit()
+    response.headers['Cache-Control']='no-store'
+    return {'token':token,'expires_at':expires}
+
+@app.delete('/api/mcp/token')
+async def revoke_mcp_token(response:Response,user:str=Depends(current_user)):
+    async with connect() as db:
+        await db.execute('DELETE FROM mcp_tokens WHERE user_id=?',(user,))
+        await db.commit()
+    response.headers['Cache-Control']='no-store'
+    return {'ok':True}
 
 @app.get('/api/profile')
 async def profile(user:str=Depends(current_user)):
@@ -334,8 +358,13 @@ async def list_meals(day:date|None=None,user:str=Depends(current_user)):
         meals=[rowdict(r) for r in await cur.fetchall()]
         for meal in meals:
             cur=await db.execute('''SELECT i.*, COALESCE(e.name,f.name,'未命名食物') AS name,
-                e.source_type,e.source_model,e.preparation,e.basis_g,e.verified,e.nutrition_json
+                COALESCE(e.source_type,fm.source_type) AS source_type,
+                COALESCE(e.source_model,fm.source_model) AS source_model,
+                COALESCE(e.preparation,fm.preparation) AS preparation,
+                COALESCE(e.basis_g,fm.basis_g) AS basis_g,
+                COALESCE(e.verified,fm.verified) AS verified,e.nutrition_json
                 FROM meal_items i LEFT JOIN foods f ON f.code=i.food_code
+                LEFT JOIN food_metadata fm ON fm.food_code=f.code
                 LEFT JOIN meal_item_estimates e ON e.meal_item_id=i.id WHERE i.meal_id=?''',(meal['id'],))
             meal['items']=[rowdict(r) for r in await cur.fetchall()]
             for item in meal['items']:
@@ -346,6 +375,13 @@ async def list_meals(day:date|None=None,user:str=Depends(current_user)):
     return meals
 
 LOCAL_TZ = ZoneInfo('Asia/Shanghai')
+
+async def today_meals_for_user(owner):
+    meals = await list_meals(day=datetime.now(LOCAL_TZ).date(), user=owner)
+    return {'truncated': len(meals)>20 or any(len(meal['items'])>30 for meal in meals[:20]),
+            'records': [{'meal_type': meal['meal_type'], 'eaten_at': meal['eaten_at'],
+             'items': [{k: item.get(k) for k in ('name','grams','kcal','protein','fat','carbs','source_type','source_model','basis_g','verified','preparation')}
+                       for item in meal['items'][:30]]} for meal in meals[:20]]}
 
 async def nutrition_summary_for_user(user: str, days: int) -> dict:
     """Aggregate recorded values by calendar day in Asia/Shanghai, not UTC."""
@@ -435,7 +471,8 @@ async def prepare_chat(body:ChatMessage,user:str):
                                  (str(uuid.uuid4()),user,body.thread_id,'user',body.message))
                 await db.commit()
             yield event('start',{'thread_id':body.thread_id})
-            async for text in chat_chunks(body.message,conversation,user_profile):
+            nutrition_context = await today_context(user, nutrition_summary_for_user, today_meals_for_user)
+            async for text in chat_chunks(body.message,conversation,user_profile,nutrition_context):
                 parts.append(text)
                 yield event('delta',{'content':text})
             if not ''.join(parts).strip():
@@ -482,6 +519,11 @@ async def history(thread_id:str,user:str=Depends(current_user)):
     async with connect() as db:
         cur=await db.execute('SELECT role,content,created_at FROM chat_messages WHERE user_id=? AND thread_id=? ORDER BY created_at,id LIMIT 100',(user,thread_id))
         return [rowdict(r) for r in await cur.fetchall()]
+
+async def mcp_http_dispatch(scope, receive, send):
+    await app.state.mcp_http(scope, receive, send)
+
+app.mount('/mcp', mcp_http_dispatch)
 
 # A single container can serve the built H5 on a free web host. API routes above
 # take precedence; the original two-container deployment leaves this disabled.

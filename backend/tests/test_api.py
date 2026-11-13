@@ -20,6 +20,67 @@ os.environ['APP_COOKIE_SECURE']='false'
 from fastapi.testclient import TestClient
 from app.main import app
 
+def test_http_mcp_authentication_isolation_and_revocation():
+    import json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    headers = {'Accept':'application/json, text/event-stream', 'Content-Type':'application/json'}
+    def call(client, token, request_id=1):
+        return client.post('/mcp/', headers={**headers,'Authorization':'Bearer '+token}, json={
+            'jsonrpc':'2.0','id':request_id,'method':'tools/call',
+            'params':{'name':'get_today_nutrition','arguments':{}}})
+    with TestClient(app) as client:
+        assert client.post('/mcp/',headers=headers,json={}).status_code == 401
+        assert client.post('/api/auth/register',json={'email':'http-mcp-a@example.com','password':'longpassword12'}).status_code == 201
+        assert client.post('/api/meals',json={'meal_type':'lunch','eaten_at':datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
+                                              'items':[{'food_code':'rice','grams':100}]}).status_code == 201
+        token_a = client.post('/api/mcp/token').json()['token']
+        init=client.post('/mcp/',headers={**headers,'Authorization':'Bearer '+token_a},json={
+            'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-03-26',
+            'capabilities':{},'clientInfo':{'name':'test','version':'1'}}})
+        assert init.status_code == 200, init.text
+        listed=client.post('/mcp/',headers={**headers,'Authorization':'Bearer '+token_a},json={
+            'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}})
+        assert any(x['name']=='get_today_nutrition' for x in listed.json()['result']['tools'])
+        first=call(client,token_a)
+        assert first.status_code==200, first.text
+        def kcal(response):
+            return json.loads(response.json()['result']['content'][0]['text'])['summary']['totals']['kcal']
+        assert kcal(first)==116
+        assert client.post('/api/auth/register',json={'email':'http-mcp-b@example.com','password':'longpassword12'}).status_code == 201
+        token_b=client.post('/api/mcp/token').json()['token']
+        assert kcal(call(client,token_b))==0
+        assert kcal(call(client,token_a))==116
+        new_token_b=client.post('/api/mcp/token').json()['token']
+        assert call(client,token_b).status_code==401
+        assert kcal(call(client,new_token_b))==0
+        assert client.delete('/api/mcp/token').status_code==200
+        assert call(client,new_token_b).status_code==401
+        assert call(client,token_a).status_code==200
+
+def test_chat_mcp_context_is_bound_to_logged_in_user(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import app.main as main
+    contexts = []
+
+    async def fake_chat(message, history, profile, nutrition_context):
+        contexts.append(nutrition_context)
+        yield 'ok'
+
+    monkeypatch.setattr(main, 'chat_chunks', fake_chat)
+    with TestClient(app) as client:
+        assert client.post('/api/auth/register', json={'email':'mcp-a@example.com','password':'longpassword12'}).status_code == 201
+        assert client.post('/api/meals', json={'meal_type':'lunch','eaten_at':datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
+                                              'items':[{'food_code':'rice','grams':100}]}).status_code == 201
+        assert 'event: done' in client.post('/api/chat/stream',json={'message':'我吃了什么','thread_id':'mcp-a'}).text
+        assert contexts[-1]['summary']['totals']['kcal'] == 116
+        assert contexts[-1]['meals']['records'][0]['items'][0]['name']
+        assert client.post('/api/auth/register', json={'email':'mcp-b@example.com','password':'longpassword12'}).status_code == 201
+        assert 'event: done' in client.post('/api/chat/stream',json={'message':'我吃了什么','thread_id':'mcp-b'}).text
+        assert contexts[-1]['summary']['totals']['kcal'] == 0
+        assert contexts[-1]['meals']['records'] == []
+
 def test_end_to_end():
     with TestClient(app) as client:
         assert client.get('/api/health').status_code==200
