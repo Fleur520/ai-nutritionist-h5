@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .ai import chat_chunks, recognize_image
+from .nutrition_mcp import today_context
 from .bisheng_recognition import recognize_workflow_image
 from .recognition_matching import resolve_recognized_items
 from .recognition_jobs import RecognitionBusy, RecognitionJobs
@@ -435,7 +436,15 @@ async def prepare_chat(body:ChatMessage,user:str):
                                  (str(uuid.uuid4()),user,body.thread_id,'user',body.message))
                 await db.commit()
             yield event('start',{'thread_id':body.thread_id})
-            async for text in chat_chunks(body.message,conversation,user_profile):
+            async def today_meals(owner):
+                meals = await list_meals(day=datetime.now(LOCAL_TZ).date(), user=owner)
+                # Keep the prompt bounded and omit IDs, image paths and raw estimate JSON.
+                return {'truncated': len(meals)>20 or any(len(meal['items'])>30 for meal in meals[:20]),
+                        'records': [{'meal_type': meal['meal_type'], 'eaten_at': meal['eaten_at'],
+                         'items': [{k: item.get(k) for k in ('name','grams','kcal','protein','fat','carbs','source_type','source_model','basis_g','verified','preparation')}
+                                   for item in meal['items'][:30]]} for meal in meals[:20]]}
+            nutrition_context = await today_context(user, nutrition_summary_for_user, today_meals)
+            async for text in chat_chunks(body.message,conversation,user_profile,nutrition_context):
                 parts.append(text)
                 yield event('delta',{'content':text})
             if not ''.join(parts).strip():

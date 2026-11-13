@@ -19,7 +19,7 @@ flowchart TB
 
 - **首页**：今日摄入汇总、拍照、营养咨询和报告入口。
 - **拍照**：上传 JPG/PNG/WebP → BiSheng 识别并检索食品知识库（也支持直接模型模式）→ 应用数据库复核编码与做法 → 人工确认食物/重量 → 成分表计算与保存。详见 [餐食识别接入说明](docs/BISHENG_FOOD_RECOGNITION.md)。
-- **AI 咨询**：FastAPI 直接调用 vLLM `/v1/chat/completions` SSE，携带用户档案及最近 12 条会话消息，**不经过 BiSheng**。
+- **AI 咨询**：FastAPI 调用 vLLM `/v1/chat/completions` SSE，携带用户档案及最近 12 条会话消息，**不经过 BiSheng**。咨询时通过进程内 MCP 工具读取当前登录用户当天餐食和营养汇总；工具仅供本进程调用，不对外提供 MCP 端点。模型不能指定用户或执行 SQL；明细有数量上限，汇总覆盖当天全部已记录数据。演示模式会显示当日热量，但不调用模型。数据可能不完整，AI 估算食物未经核验。
 - **饮食记录**：每日三餐记录和统计；按 `Asia/Shanghai` 日期聚合。
 - **报告**：FastAPI 汇总近 7/30 日数据 → `BiSheng 1.3.1 /api/v2/workflow/invoke` → 保存报告文本和统计快照 → H5 展示历史。
 - **我的**：注册/登录、个人档案、目标。会话 Cookie 为 HttpOnly，同一用户数据隔离。

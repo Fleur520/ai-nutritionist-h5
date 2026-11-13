@@ -20,6 +20,29 @@ os.environ['APP_COOKIE_SECURE']='false'
 from fastapi.testclient import TestClient
 from app.main import app
 
+def test_chat_mcp_context_is_bound_to_logged_in_user(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import app.main as main
+    contexts = []
+
+    async def fake_chat(message, history, profile, nutrition_context):
+        contexts.append(nutrition_context)
+        yield 'ok'
+
+    monkeypatch.setattr(main, 'chat_chunks', fake_chat)
+    with TestClient(app) as client:
+        assert client.post('/api/auth/register', json={'email':'mcp-a@example.com','password':'longpassword12'}).status_code == 201
+        assert client.post('/api/meals', json={'meal_type':'lunch','eaten_at':datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
+                                              'items':[{'food_code':'rice','grams':100}]}).status_code == 201
+        assert 'event: done' in client.post('/api/chat/stream',json={'message':'我吃了什么','thread_id':'mcp-a'}).text
+        assert contexts[-1]['summary']['totals']['kcal'] == 116
+        assert contexts[-1]['meals']['records'][0]['items'][0]['name']
+        assert client.post('/api/auth/register', json={'email':'mcp-b@example.com','password':'longpassword12'}).status_code == 201
+        assert 'event: done' in client.post('/api/chat/stream',json={'message':'我吃了什么','thread_id':'mcp-b'}).text
+        assert contexts[-1]['summary']['totals']['kcal'] == 0
+        assert contexts[-1]['meals']['records'] == []
+
 def test_end_to_end():
     with TestClient(app) as client:
         assert client.get('/api/health').status_code==200

@@ -87,7 +87,7 @@ def test_job_api_delivers_before_completion_and_stops_without_saving_partial(mon
     from app import main
 
     calls = []
-    async def chunks(message, history, profile):
+    async def chunks(message, history, profile, nutrition_context):
         calls.append(message)
         yield '第一段'
         await asyncio.sleep(20 if message == 'stop' else 0.2)
