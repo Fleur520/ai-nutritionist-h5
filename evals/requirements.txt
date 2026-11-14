@@ -1,0 +1,5 @@
+ragas==0.4.3
+deepeval==4.3.3
+openai>=2,<3
+# Ragas 0.4.3 imports the legacy ChatVertexAI module removed in community 0.4.2.
+langchain-community==0.3.31
