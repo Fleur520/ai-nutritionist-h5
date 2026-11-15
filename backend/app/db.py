@@ -1,12 +1,11 @@
-"""Small asynchronous adapter for SQLite development and MySQL deployments."""
+"""Small asynchronous adapter for the application's MySQL database."""
 import asyncio
-import sqlite3
 import ssl
 from contextlib import asynccontextmanager
 import pymysql
 from .config import get_settings
 
-INTEGRITY_ERRORS = (sqlite3.IntegrityError, pymysql.IntegrityError)
+INTEGRITY_ERRORS = (pymysql.IntegrityError,)
 
 
 def mysql_tls(settings):
@@ -27,22 +26,6 @@ FOODS = [
  ('tomato','番茄',18,.9,.2,3.9),
  ('potato','土豆（熟）',87,1.9,.1,20.1),
 ]
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS mcp_tokens(user_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,expires_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS profiles(user_id TEXT PRIMARY KEY,name TEXT DEFAULT '',age INTEGER,height_cm REAL,weight_kg REAL,goal TEXT DEFAULT 'balanced');
-CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,path TEXT NOT NULL,mime TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS foods(code TEXT PRIMARY KEY,name TEXT NOT NULL,kcal REAL NOT NULL,protein REAL NOT NULL,fat REAL NOT NULL,carbs REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS meals(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,meal_type TEXT NOT NULL,eaten_at TEXT NOT NULL,image_id TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS meal_items(id TEXT PRIMARY KEY,meal_id TEXT NOT NULL,food_code TEXT NOT NULL,grams REAL NOT NULL,kcal REAL NOT NULL,protein REAL NOT NULL,fat REAL NOT NULL,carbs REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,thread_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS nutrition_reports(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,days INTEGER NOT NULL,summary_json TEXT NOT NULL,content TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE INDEX IF NOT EXISTS idx_reports_user_time ON nutrition_reports(user_id,created_at);
-CREATE INDEX IF NOT EXISTS idx_meals_user_time ON meals(user_id,eaten_at);
-CREATE INDEX IF NOT EXISTS idx_chat_user_thread ON chat_messages(user_id,thread_id);
-"""
-
 # Keep ISO timestamps with offsets as strings: auth and reporting parse these in
 # Python. MySQL TIMESTAMP is only used for database-generated creation times.
 # MySQL 5.7 has no CREATE INDEX IF NOT EXISTS, so indexes belong to CREATE TABLE.
@@ -108,77 +91,55 @@ class Cursor:
     async def fetchall(self): return await asyncio.to_thread(self.cursor.fetchall)
 
 class DB:
-    def __init__(self, connection, engine='sqlite'):
+    def __init__(self, connection):
         self.connection=connection
-        self.engine=engine
+        self.engine='mysql'
     async def execute(self, sql, params=()):
-        if self.engine == 'mysql':
-            def execute():
-                cursor=self.connection.cursor()
-                try:
-                    cursor.execute(sql.replace('?', '%s'),params)
-                except BaseException:
-                    cursor.close()
-                    raise
-                return cursor
-            return Cursor(await asyncio.to_thread(execute))
-        return Cursor(await asyncio.to_thread(self.connection.execute, sql, params))
+        def execute():
+            cursor=self.connection.cursor()
+            try:
+                cursor.execute(sql.replace('?', '%s'),params)
+            except BaseException:
+                cursor.close()
+                raise
+            return cursor
+        return Cursor(await asyncio.to_thread(execute))
     async def executemany(self, sql, params):
-        if self.engine == 'mysql':
-            def executemany():
-                with self.connection.cursor() as cursor:
-                    return cursor.executemany(sql.replace('?', '%s'),params)
-            return await asyncio.to_thread(executemany)
-        return await asyncio.to_thread(self.connection.executemany, sql, params)
+        def executemany():
+            with self.connection.cursor() as cursor:
+                return cursor.executemany(sql.replace('?', '%s'),params)
+        return await asyncio.to_thread(executemany)
     async def executescript(self, sql):
-        if self.engine == 'mysql':
-            # Schema scripts contain only DDL, with no semicolons in literals.
-            for statement in sql.split(';'):
-                if statement.strip():
-                    await self.execute(statement)
-            return
-        return await asyncio.to_thread(self.connection.executescript, sql)
+        # Schema scripts contain only DDL, with no semicolons in literals.
+        for statement in sql.split(';'):
+            if statement.strip():
+                await self.execute(statement)
     async def commit(self): await asyncio.to_thread(self.connection.commit)
     async def rollback(self): await asyncio.to_thread(self.connection.rollback)
 
 @asynccontextmanager
 async def connect():
     settings=get_settings()
-    if settings.app_db_engine == 'mysql':
-        con=await asyncio.to_thread(
-            pymysql.connect,host=settings.mysql_host,port=settings.mysql_port,
-            user=settings.mysql_user,password=settings.mysql_password,
-            database=settings.mysql_database,charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=settings.mysql_connect_timeout,
-            read_timeout=30,write_timeout=30,autocommit=False,
-            ssl=mysql_tls(settings),
-            # Match SQLite's UTC CURRENT_TIMESTAMP behavior on every server.
-            init_command="SET time_zone = '+00:00'",
-        )
-        try:
-            yield DB(con,'mysql')
-        except BaseException:
-            await asyncio.to_thread(con.rollback)
-            raise
-        finally:
-            await asyncio.to_thread(con.close)
-        return
-    path=settings.app_db_path
-    path.parent.mkdir(parents=True,exist_ok=True)
-    con=await asyncio.to_thread(sqlite3.connect, path.as_posix(), check_same_thread=False,timeout=5)
-    con.row_factory=sqlite3.Row
+    con=await asyncio.to_thread(
+        pymysql.connect,host=settings.mysql_host,port=settings.mysql_port,
+        user=settings.mysql_user,password=settings.mysql_password,
+        database=settings.mysql_database,charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=settings.mysql_connect_timeout,
+        read_timeout=30,write_timeout=30,autocommit=False,
+        ssl=mysql_tls(settings),
+        init_command="SET time_zone = '+00:00'",
+    )
     try:
-        await asyncio.to_thread(con.execute, 'PRAGMA foreign_keys=ON')
-        await asyncio.to_thread(con.execute, 'PRAGMA journal_mode=WAL')
-        await asyncio.to_thread(con.execute, 'PRAGMA busy_timeout=5000')
         yield DB(con)
+    except BaseException:
+        await asyncio.to_thread(con.rollback)
+        raise
     finally:
         await asyncio.to_thread(con.close)
 
 async def initialize():
     async with connect() as db:
-        await db.executescript(MYSQL_SCHEMA if db.engine == 'mysql' else SCHEMA)
-        insert='INSERT IGNORE' if db.engine == 'mysql' else 'INSERT OR IGNORE'
-        await db.executemany(insert+' INTO foods(code,name,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?)',FOODS)
+        await db.executescript(MYSQL_SCHEMA)
+        await db.executemany('INSERT IGNORE INTO foods(code,name,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?)',FOODS)
         await db.commit()

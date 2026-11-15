@@ -35,11 +35,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.lock.txt
-      - name: Backend tests with SQLite
-        working-directory: backend
-        env:
-          APP_REPORTS_ENABLED: 'true'
-        run: python -m pytest tests -q --junitxml=../test-results/sqlite.xml
       - name: Backend tests with MySQL 5.7
         working-directory: backend
         env:
@@ -74,7 +69,7 @@ jobs:
       - name: Accept free-hosting image before public startup
         run: |
           docker build -t nutrition-hosted:ci .
-          docker run -d --name nutrition-hosted-ci -p 127.0.0.1:18081:10000 -e APP_DB_ENGINE=sqlite -e APP_DB_PATH=/tmp/test_hosted.db -e APP_IMAGE_STORAGE=database -e DEMO_MODE=true -e APP_COOKIE_SECURE=false -e APP_REPORTS_ENABLED=false -e APP_REVISION=ci nutrition-hosted:ci
+          docker run -d --name nutrition-hosted-ci --network host -e PORT=18081 -e APP_DB_ENGINE=mysql -e MYSQL_HOST=127.0.0.1 -e MYSQL_PORT=3306 -e MYSQL_USER=root -e MYSQL_PASSWORD=ci_test_password -e MYSQL_DATABASE=test_nutrition_ci -e APP_IMAGE_STORAGE=database -e DEMO_MODE=true -e APP_COOKIE_SECURE=false -e APP_REPORTS_ENABLED=false -e APP_REVISION=ci nutrition-hosted:ci
           trap 'docker logs --tail 100 nutrition-hosted-ci; docker rm -f nutrition-hosted-ci' EXIT
           for attempt in $(seq 1 90); do
             if curl --fail --silent http://127.0.0.1:18081/api/health > /dev/null; then

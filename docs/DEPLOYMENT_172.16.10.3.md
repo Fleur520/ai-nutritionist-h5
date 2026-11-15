@@ -62,7 +62,7 @@ sudo env DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 bash deploy/install.sh
 sudo docker-compose restart api web
 ```
 
-数据库初始化模块 `python -m app.bootstrap_db` 仅创建配置中指定的数据库（不存在时），不删除数据库。后端默认仍支持 `APP_DB_ENGINE=sqlite` 用于本地开发。
+数据库初始化模块 `python -m app.bootstrap_db` 仅创建配置中指定的数据库（不存在时），不删除数据库。运行时统一使用 MySQL；旧 SQLite 数据需要按 [MySQL 迁移说明](MYSQL_MIGRATION.md)迁移，不能直接将环境变量切换后启动。
 
 验收脚本 `deploy/verify_deployment.py` 在 API 容器内经过 Nginx 请求真实服务；`prepare` 阶段创建随机测试账号，`resume` 阶段确认重启持久化并移除本次测试账号和记录，`cleanup` 可单独清理未完成的测试。不得在生产用户账号上执行替代清理操作。
 

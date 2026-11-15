@@ -21,14 +21,14 @@ from app.config import Settings
 
 @pytest.fixture
 def recognition_api(tmp_path, monkeypatch):
-    engine = os.environ.get('TEST_DB_ENGINE', 'sqlite')
+    engine = os.environ.get('TEST_DB_ENGINE')
     mysql_database = os.environ.get('TEST_MYSQL_DATABASE', '')
     if engine == 'mysql' and not mysql_database.startswith('test_'):
         raise RuntimeError('MySQL tests require TEST_MYSQL_DATABASE starting with test_')
     settings = Settings(
         _env_file=None, app_db_engine=engine,
         mysql_database=mysql_database if engine == 'mysql' else 'test_unused',
-        app_db_path=tmp_path / 'recognition.sqlite3', app_media_dir=tmp_path / 'media',
+        app_media_dir=tmp_path / 'media',
         demo_mode=False, app_cookie_secure=False, app_nginx_accel=False,
         food_recognition_provider='bisheng',
     )

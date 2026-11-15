@@ -33,3 +33,11 @@ class ChatMessage(BaseModel):
     message: str=Field(min_length=1,max_length=1500)
     thread_id: str=Field(min_length=1,max_length=90,pattern=r'^[\w-]+$')
 
+
+
+class TriageMessage(BaseModel):
+    role: Literal['user', 'assistant']
+    content: str = Field(min_length=1, max_length=1500)
+
+class TriageRequest(BaseModel):
+    messages: list[TriageMessage] = Field(min_length=1, max_length=20)

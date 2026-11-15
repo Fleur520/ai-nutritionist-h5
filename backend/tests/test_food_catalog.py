@@ -63,26 +63,31 @@ def test_matching_respects_preparation_and_ambiguity():
     assert match_food('紫薯',[raw,cooked,other]) is None
 
 
-def test_catalog_schema_is_idempotent_and_sources_are_preserved(monkeypatch,tmp_path):
-    monkeypatch.setattr(db,'get_settings',lambda:SimpleNamespace(
-        app_db_engine='sqlite',app_db_path=tmp_path/'catalog.sqlite3'))
+def test_catalog_schema_is_idempotent_and_sources_are_preserved():
+    import uuid
     async def scenario():
         await db.initialize()
         await initialize_catalog()
         await initialize_catalog()
-        item=validate_food(candidate(),'薯芋熟食')
-        async with db.connect() as connection:
-            await connection.execute('INSERT INTO foods(code,name,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?)',
-                tuple(item[k] for k in ('code','name','kcal','protein','fat','carbs')))
-            await connection.execute('''INSERT INTO food_metadata(food_code,category,preparation,aliases_json,
-                source_type,source_model,batch_id) VALUES(?,?,?,?,?,?,?)''',
-                (item['code'],'薯芋熟食','蒸熟','["紫薯","蒸紫薯"]','ai_estimate','test-model','test-batch'))
-            await connection.commit()
-        rows=await catalog_rows()
-        assert len(rows)==11
-        generated=next(x for x in rows if x['code']==item['code'])
-        assert generated['source_type']=='ai_estimate' and generated['verified'] is False
-        assert generated['basis_g']==100 and generated['aliases']==['紫薯','蒸紫薯']
-        legacy=next(x for x in rows if x['code']=='rice')
-        assert legacy['source_type']=='demo' and legacy['kcal']==116
+        food=candidate();food['name'] += uuid.uuid4().hex
+        item=validate_food(food,'薯芋熟食')
+        try:
+            async with db.connect() as connection:
+                await connection.execute('INSERT INTO foods(code,name,kcal,protein,fat,carbs) VALUES(?,?,?,?,?,?)',
+                    tuple(item[k] for k in ('code','name','kcal','protein','fat','carbs')))
+                await connection.execute('''INSERT INTO food_metadata(food_code,category,preparation,aliases_json,
+                    source_type,source_model,batch_id) VALUES(?,?,?,?,?,?,?)''',
+                    (item['code'],'薯芋熟食','蒸熟','["紫薯","蒸紫薯"]','ai_estimate','test-model','test-batch'))
+                await connection.commit()
+            rows=await catalog_rows()
+            generated=next(x for x in rows if x['code']==item['code'])
+            assert generated['source_type']=='ai_estimate' and generated['verified'] is False
+            assert generated['basis_g']==100 and generated['aliases']==['紫薯','蒸紫薯']
+            legacy=next(x for x in rows if x['code']=='rice')
+            assert legacy['source_type']=='demo' and legacy['kcal']==116
+        finally:
+            async with db.connect() as connection:
+                await connection.execute('DELETE FROM food_metadata WHERE food_code=?',(item['code'],))
+                await connection.execute('DELETE FROM foods WHERE code=?',(item['code'],))
+                await connection.commit()
     asyncio.run(scenario())

@@ -12,8 +12,8 @@ async def initialize_media(settings):
     if settings.app_image_storage != 'database':
         return
     async with connect() as db:
-        column = 'MEDIUMBLOB' if db.engine == 'mysql' else 'BLOB'
-        key = 'CHAR(36) CHARACTER SET ascii' if db.engine == 'mysql' else 'TEXT'
+        column = 'MEDIUMBLOB'
+        key = 'CHAR(36) CHARACTER SET ascii'
         await db.execute(f'CREATE TABLE IF NOT EXISTS image_payloads(image_id {key} PRIMARY KEY, content {column} NOT NULL)')
         await db.commit()
 

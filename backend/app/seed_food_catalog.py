@@ -116,7 +116,7 @@ async def run(args):
              'completed': 0, 'inserted': int(previous['total']), 'duplicates': 0, 'rejected': 0, 'failed': []}
     config = {'target_per_topic': args.count, 'concurrency': args.concurrency,
               'max_tokens': args.max_tokens, 'basis_g': 100, 'source_type': 'ai_estimate'}
-    insert = 'INSERT IGNORE' if s.app_db_engine == 'mysql' else 'INSERT OR IGNORE'
+    insert = 'INSERT IGNORE'
     async with connect() as db:
         await db.execute(insert+' INTO food_import_batches(id,model,status,config_json,stats_json) VALUES(?,?,?,?,?)',
                          (args.batch_id, s.vllm_model, 'running', json.dumps(config), json.dumps(stats)))

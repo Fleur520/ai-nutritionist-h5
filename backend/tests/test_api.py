@@ -4,15 +4,7 @@ from pathlib import Path
 
 # Important: set all settings before importing app.
 _TEMP=tempfile.TemporaryDirectory()
-# A deployment .env may select MySQL. Tests only use it when deliberately
-# pointed at a separate test database, never by inheriting production settings.
-os.environ['APP_DB_ENGINE']=os.environ.get('TEST_DB_ENGINE','sqlite')
-if os.environ['APP_DB_ENGINE']=='mysql':
-    test_database=os.environ.get('TEST_MYSQL_DATABASE','')
-    if not test_database or not test_database.startswith('test_'):
-        raise RuntimeError('MySQL tests require TEST_MYSQL_DATABASE starting with test_')
-    os.environ['MYSQL_DATABASE']=test_database
-os.environ['APP_DB_PATH']=str(Path(_TEMP.name)/'db.sqlite3')
+# conftest requires an explicit isolated test_ MySQL database before import.
 os.environ['APP_MEDIA_DIR']=str(Path(_TEMP.name)/'media')
 os.environ['DEMO_MODE']='true'
 os.environ['APP_COOKIE_SECURE']='false'
