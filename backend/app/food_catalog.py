@@ -56,9 +56,8 @@ def validate_food(item, category):
 
 async def initialize_catalog():
     async with connect() as db:
-        mysql = db.engine == 'mysql'
-        code_type = 'VARCHAR(64) CHARACTER SET ascii' if mysql else 'TEXT'
-        suffix = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' if mysql else ''
+        code_type = 'VARCHAR(64) CHARACTER SET ascii'
+        suffix = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin'
         await db.executescript(f'''
         CREATE TABLE IF NOT EXISTS food_metadata(
           food_code {code_type} PRIMARY KEY, category VARCHAR(64) NOT NULL,

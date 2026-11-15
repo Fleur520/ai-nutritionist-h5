@@ -43,6 +43,7 @@ onMounted(reload)
       <button class="quick-card ask" @click="emit('go','chat')"><div class="quick-card-top"><span class="quick-icon"><MessageCircle :size="24"/></span><ArrowUpRight :size="18"/></div><h3>聊聊怎么吃</h3><p>把饮食困惑，交给 AI</p><span class="quick-link">问问营养师 <ArrowRight :size="14"/></span></button>
     </div>
 
+    <button class="tip-card" @click="emit('go','triage')"><span class="tip-icon"><MessageCircle :size="21"/></span><span><b>症状导诊</b><small>聊聊症状，参考推荐就诊科室</small></span><ArrowRight :size="18"/></button>
     <button class="tip-card journal-link" @click="emit('go','history')"><span class="tip-icon"><NotebookPen :size="22"/></span><span><b>你的饮食日记</b><small>{{hasRecords?'看看今天的记录与最近 7 天的变化':'让每一餐，都留下好好生活的痕迹'}}</small></span><ArrowRight :size="18"/></button>
     <button v-if="reportsEnabled" class="tip-card" @click="emit('go','report')"><span class="tip-icon"><Leaf :size="21"/></span><span><b>我的营养报告</b><small>用 7 日或 30 日记录，了解饮食变化</small></span><ArrowRight :size="18"/></button>
     <div class="daily-note"><Leaf :size="17"/><p>吃得丰富一点，生活从容一点。<span>照片识别和营养数据为估算，请按实际分量确认。</span></p></div>

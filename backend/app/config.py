@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -11,7 +11,10 @@ class Settings(BaseSettings):
     app_allowed_origin: str = 'http://localhost:5173'
     app_login_alias: str = ''
     app_login_alias_email: str = ''
-    app_db_engine: Literal['sqlite', 'mysql'] = 'sqlite'
+    # Reject legacy SQLite configuration rather than silently opening a new,
+    # empty MySQL database. Existing installations must migrate explicitly.
+    app_db_engine: Literal['mysql'] = 'mysql'
+    # Only used to detect an existing legacy database; never opened by runtime.
     app_db_path: Path = Path('./data/nutrition.db')
     mysql_host: str = '127.0.0.1'
     mysql_port: int = Field(3306, ge=1, le=65535)
@@ -55,8 +58,13 @@ class Settings(BaseSettings):
     vllm_vision_max_tokens: int = Field(1536, ge=128, le=16384)
     vllm_vision_enable_thinking: bool = False
 
+    @model_validator(mode='after')
+    def require_explicit_mysql_when_legacy_data_exists(self):
+        if 'app_db_engine' not in self.model_fields_set and self.app_db_path.is_file():
+            raise ValueError('Existing SQLite data detected; migrate it before explicitly setting APP_DB_ENGINE=mysql')
+        return self
+
 @lru_cache
 
 def get_settings() -> Settings:
     return Settings()
-

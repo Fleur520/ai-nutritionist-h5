@@ -28,7 +28,7 @@ from .auth import COOKIE, check_password, create_session, current_user, hash_pas
 from .config import get_settings
 from .db import INTEGRITY_ERRORS, connect, initialize
 from .food_catalog import catalog_rows, initialize_catalog, match_food
-from .schemas import ChatMessage, Credentials, LoginCredentials, MealCreate, ProfilePatch
+from .schemas import ChatMessage, Credentials, LoginCredentials, MealCreate, ProfilePatch, TriageRequest
 from .meal_estimates import (NUTRIENTS, initialize_estimates, save_recognition,
                              recognition_for_meal, model_item)
 
@@ -43,6 +43,8 @@ Image.MAX_IMAGE_PIXELS=16_000_000
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialize()
+    from .departments import initialize_departments
+    await initialize_departments()
     await initialize_catalog()
     await initialize_estimates()
     await initialize_media(settings)
@@ -524,6 +526,23 @@ async def mcp_http_dispatch(scope, receive, send):
     await app.state.mcp_http(scope, receive, send)
 
 app.mount('/mcp', mcp_http_dispatch)
+
+@app.post('/api/triage')
+async def triage(body: TriageRequest, user: str = Depends(current_user)):
+    from .triage import triage_graph
+    if body.messages[-1].role != 'user':
+        raise HTTPException(422, '请先输入症状')
+    await ai_slot()
+    try:
+        result = await triage_graph.ainvoke({'messages': [m.model_dump() for m in body.messages]})
+        return {'reply': result['reply']}
+    except Exception as exc:
+        # Do not log model responses or user-provided health information.
+        log.warning('triage failed: %s', type(exc).__name__)
+        raise HTTPException(503, '导诊服务暂不可用，请咨询医院导诊台') from exc
+    finally:
+        AI_SEM.release()
+
 
 # A single container can serve the built H5 on a free web host. API routes above
 # take precedence; the original two-container deployment leaves this disabled.

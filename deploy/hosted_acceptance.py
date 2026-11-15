@@ -16,7 +16,7 @@ from app.db import connect
 
 async def prior_model_check(revision):
     async with connect() as db:
-        key = 'VARCHAR(128)' if db.engine == 'mysql' else 'TEXT'
+        key = 'VARCHAR(128)'
         await db.execute(f'CREATE TABLE IF NOT EXISTS hosted_acceptance(revision {key} PRIMARY KEY, checked_at VARCHAR(40) NOT NULL)')
         await db.commit()
         return await (await db.execute('SELECT 1 FROM hosted_acceptance WHERE revision=?', (revision,))).fetchone() is not None
@@ -24,7 +24,7 @@ async def prior_model_check(revision):
 
 async def mark_model_check(revision):
     async with connect() as db:
-        insert = 'INSERT IGNORE' if db.engine == 'mysql' else 'INSERT OR IGNORE'
+        insert = 'INSERT IGNORE'
         await db.execute(insert + ' INTO hosted_acceptance(revision,checked_at) VALUES(?,?)', (revision, datetime.now(timezone.utc).isoformat()))
         await db.commit()
 

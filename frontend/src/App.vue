@@ -7,6 +7,7 @@ import AuthGate from './components/AuthGate.vue'
 import HomePage from './pages/HomePage.vue'
 import ScanPage from './pages/ScanPage.vue'
 import ChatPage from './pages/ChatPage.vue'
+import TriagePage from './pages/TriagePage.vue'
 import HistoryPage from './pages/HistoryPage.vue'
 import ProfilePage from './pages/ProfilePage.vue'
 import ReportPage from './pages/ReportPage.vue'
@@ -49,6 +50,7 @@ function go(value:string){tab.value=value;window.scrollTo({top:0,behavior:'insta
         <KeepAlive><ScanPage v-if="tab==='scan'" @go="go"/></KeepAlive>
         <HomePage v-if="tab==='home'" @go="go"/>
         <ChatPage v-else-if="tab==='chat'"/>
+        <TriagePage v-else-if="tab==='triage'"/>
         <HistoryPage v-else-if="tab==='history'" @go="go"/>
         <ReportPage v-else-if="reportsEnabled && tab==='report'" @go="go"/>
         <ProfilePage v-else-if="tab==='profile'" @logout="user=null;tab='home'"/>

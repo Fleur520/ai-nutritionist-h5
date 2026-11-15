@@ -1,8 +1,8 @@
 # 食光 · AI 营养师 H5
 
-> 面向普通成年人健康管理的轻量 MVP。**Python FastAPI + Vue3 H5 + MySQL / SQLite + Nginx + Qwen 多模态**。目标最多同时处理 **10 个在途 AI 请求**，单 Uvicorn Worker 限制；上线前需压测 GPU 推理容量。
+> 面向普通成年人健康管理的轻量 MVP。**Python FastAPI + Vue3 H5 + MySQL + Nginx + Qwen 多模态**。目标最多同时处理 **10 个在途 AI 请求**，单 Uvicorn Worker 限制；上线前需压测 GPU 推理容量。
 
-172.16.10.3 的实际部署使用已有 MySQL 5.7、新建的 `ai_nutritionist_h5` 数据库及 `Qwen3.8-27B`。本次报告功能暂不启用。配置位置、运维命令和部署说明见 [服务器部署说明](docs/DEPLOYMENT_172.16.10.3.md)。以下 SQLite / BiSheng 内容保留为其他部署模式的参考。
+172.16.10.3 的实际部署使用已有 MySQL 5.7、新建的 `ai_nutritionist_h5` 数据库及 `Qwen3.8-27B`。本次报告功能暂不启用。配置位置、运维命令和部署说明见 [服务器部署说明](docs/DEPLOYMENT_172.16.10.3.md)。旧版 SQLite 数据须先按[迁移说明](docs/MYSQL_MIGRATION.md)手动导入。
 
 ## 业务分流
 
@@ -10,7 +10,7 @@
 flowchart TB
  H[Vue3 H5] --> N[Nginx :18080]
  N --> P[FastAPI :8000]
- P --> D[(SQLite + 本地图片)]
+ P --> D[(MySQL + 本地图片)]
  P -->|普通咨询 SSE| Q[Qwen / vLLM]
  P -->|拍照识别，可配置| B[BiSheng 1.3.1 Workflow]
  P -->|可选 7/30 日健康报告| B
@@ -33,6 +33,7 @@ console.log(await r.json());
 ```
 
 撤销令牌：`fetch('/api/mcp/token', {method: 'DELETE'})`。两项操作均需当前网站登录会话，且不会修改餐食数据。服务应只通过 HTTPS 对外提供。此接口在本版本合并和成功部署前不可用。
+- **症状导诊**：首页入口通过 LangGraph 进行多轮症状采集，借助本地 MCP 工具读取 MySQL 的通用科室目录；结果仅供挂号参考，不是医疗诊断。目录不代表任何特定医院实际开设的科室，须在上线前进行医疗安全验收。
 - **饮食记录**：每日三餐记录和统计；按 `Asia/Shanghai` 日期聚合。
 - **报告**：FastAPI 汇总近 7/30 日数据 → `BiSheng 1.3.1 /api/v2/workflow/invoke` → 保存报告文本和统计快照 → H5 展示历史。
 - **我的**：注册/登录、个人档案、目标。会话 Cookie 为 HttpOnly，同一用户数据隔离。
@@ -113,9 +114,6 @@ curl http://172.16.10.3:18080/api/health
 ├── docker-compose.yml
 ├── frontend/ backend/ deploy/ docs/
 └── data/
-    ├── nutrition.db       # SQLite (WAL)
-    ├── nutrition.db-wal
-    ├── nutrition.db-shm
     └── media/             # 图片，经 FastAPI 鉴权后 Nginx X-Accel-Redirect 读取
 ```
 
@@ -134,6 +132,7 @@ curl http://172.16.10.3:18080/api/health
 | `GET /api/nutrition/summary?days=7` | 日期聚合（Asia/Shanghai） |
 | `POST /api/chat/stream` | **Qwen SSE** 营养咨询 |
 | `GET /api/chat/history?thread_id=...` | 当前用户聊天历史 |
+| `POST /api/triage` | 登录后多轮症状导诊；本轮对话仅在页面内存中保留 |
 | `POST /api/reports/generate?days=7` | **BiSheng Workflow** 健康报告 |
 | `GET /api/reports`、`GET /api/reports/{id}` | 历史报告、报告详情 |
 
@@ -148,7 +147,7 @@ curl http://172.16.10.3:18080/api/health
 ```bash
 cd backend
 python -m pip install -r requirements.lock.txt
-PYTHONPATH=. pytest -q
+TEST_DB_ENGINE=mysql TEST_MYSQL_DATABASE=test_nutrition_local MYSQL_HOST=127.0.0.1 MYSQL_USER=<测试账号> APP_REPORTS_ENABLED=true python -m pytest tests -q
 ```
 
 前端：
@@ -159,7 +158,7 @@ npm ci
 npm run build
 ```
 
-纯本地开发 `DEMO_MODE=true` 且 `APP_COOKIE_SECURE=false`；Vite 通过 `/api` 转发给本地 FastAPI。服务器部署则使用两容器构建，不需要宿主机手动安装 Node 或 Python 依赖。
+先创建独立的 `test_` MySQL 数据库；测试账号需能创建和删除随机命名的 `test_migration_` 数据库，以验证迁移。测试绝不使用应用数据库，密码应放在受限环境中。纯本地开发可设置 `DEMO_MODE=true` 且 `APP_COOKIE_SECURE=false`；Vite 通过 `/api` 转发给本地 FastAPI。导诊需要另行配置兼容模型，演示模式不会伪造导诊答案。
 
 ## 五、工程边界
 

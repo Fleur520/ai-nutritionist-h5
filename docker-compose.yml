@@ -10,7 +10,6 @@ services:
     env_file:
       - .env
     environment:
-      APP_DB_PATH: /app/data/nutrition.db
       APP_MEDIA_DIR: /app/data/media
       APP_NGINX_ACCEL: "true"
       VLLM_CHAT_COMPLETIONS_URL: ${VLLM_CHAT_COMPLETIONS_URL:-${LLM_BASE_URL:-http://172.16.10.3:9000/v1}/chat/completions}

@@ -7,9 +7,6 @@ from .db import mysql_tls
 
 def main():
     settings = get_settings()
-    if settings.app_db_engine != 'mysql':
-        print('SQLite selected; no server database creation required.')
-        return
     import pymysql
 
     database = settings.mysql_database

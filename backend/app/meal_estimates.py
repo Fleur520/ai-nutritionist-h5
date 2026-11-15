@@ -28,9 +28,9 @@ async def initialize_estimates():
     # Additive tables leave every existing meal and food unchanged and permit
     # the previous release to continue reading stored nutrient totals.
     async with connect() as db:
-        identity = 'CHAR(36) CHARACTER SET ascii' if db.engine == 'mysql' else 'TEXT'
-        document = 'LONGTEXT' if db.engine == 'mysql' else 'TEXT'
-        suffix = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' if db.engine == 'mysql' else ''
+        identity = 'CHAR(36) CHARACTER SET ascii'
+        document = 'LONGTEXT'
+        suffix = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin'
         await db.executescript(f'''
         CREATE TABLE IF NOT EXISTS meal_recognitions(
           id {identity} PRIMARY KEY, user_id {identity} NOT NULL,

@@ -7,3 +7,6 @@ pymysql>=1.1.1,<2
 pillow>=10.4,<13
 pytest>=8,<10
 mcp>=1.30,<2
+langchain-core>=0.3,<2
+langchain-openai>=0.3,<2
+langgraph>=0.3,<2
